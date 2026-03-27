@@ -4,7 +4,6 @@
 import sys
 from pathlib import Path
 import logging
-import time
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
