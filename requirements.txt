@@ -1,0 +1,25 @@
+# Web爬虫
+requests
+beautifulsoup4
+selenium
+
+# 数据处理
+pandas
+numpy
+
+# 数据库
+sqlalchemy
+
+# 可视化
+streamlit
+plotly
+
+# 定时任务
+schedule
+APScheduler
+
+# 日志和配置
+python-dotenv
+
+# 工具
+Pillow

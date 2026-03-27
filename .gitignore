@@ -1,0 +1,17 @@
+# 忽略虚拟环境
+venv/
+.venv/
+env/
+
+# 忽略本地数据（保护隐私 & 防止大文件报错）
+data/
+*.db
+*.csv
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略系统文件
+.DS_Store
+.vscode/
