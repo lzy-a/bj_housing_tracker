@@ -1,10 +1,6 @@
-"""
-数据清洗和转换模块
-"""
 import pandas as pd
-import numpy as np
-from typing import Dict, List
 import logging
+from typing import Dict, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,7 +11,11 @@ class DataCleaner:
     @staticmethod
     def clean_listings(listings: List[Dict]) -> pd.DataFrame:
         """清洗房源数据"""
+        if not listings:
+            return pd.DataFrame()
+        
         df = pd.DataFrame(listings)
+        logger.info(f"原始数据数量: {len(df)}")
         
         # 处理缺失值
         df = df.dropna(subset=['price', 'area'])
@@ -30,39 +30,22 @@ class DataCleaner:
         df = df[df['area'] > 0]
         df = df[df['unit_price'] > 0]
         
-        # 移除极端值（3倍标准差）
-        for col in ['price', 'unit_price']:
-            mean = df[col].mean()
-            std = df[col].std()
-            df = df[(df[col] >= mean - 3*std) & (df[col] <= mean + 3*std)]
-        
+        logger.info(f"清洗后数据数量: {len(df)}")
         return df
     
     @staticmethod
     def aggregate_by_district(df: pd.DataFrame) -> pd.DataFrame:
         """按区聚合数据"""
-        agg_dict = {
-            'price': ['mean', 'median', 'min', 'max', 'std'],
+        if df.empty:
+            return pd.DataFrame()
+        
+        district_stats = df.groupby('district').agg({
+            'price': ['mean', 'median', 'count'],
             'unit_price': ['mean', 'median'],
-            'area': ['mean', 'median']
-        }
+            'area': ['mean']
+        }).reset_index()
         
-        district_stats = df.groupby('district').agg(agg_dict)
-        district_stats.columns = ['_'.join(col).strip() for col in district_stats.columns.values]
+        district_stats.columns = ['district', 'avg_price', 'median_price', 
+                                   'count', 'avg_unit_price', 'median_unit_price', 'avg_area']
         
-        return district_stats.reset_index()
-    
-    @staticmethod
-    def calculate_price_trends(df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
-        """计算价格趋势"""
-        df = df.sort_values('timestamp')
-        
-        # 按区计算移动平均
-        df['price_ma'] = df.groupby('district')['unit_price'].transform(
-            lambda x: x.rolling(window=window, min_periods=1).mean()
-        )
-        
-        # 计算环比变化
-        df['price_change_pct'] = df.groupby('district')['unit_price'].pct_change() * 100
-        
-        return df
+        return district_stats
