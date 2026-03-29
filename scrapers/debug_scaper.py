@@ -38,57 +38,73 @@ try:
     
     with open('debug_remote.html', 'w', encoding='utf-8') as f:
         f.write(html)
-    logger.info("✅ HTML 已保存到 debug_remote.html")
+    logger.info("✅ HTML 已保存到 debug_remote.html\n")
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    print("\n" + "=" * 60)
-    print("1️⃣  检查房源列表")
-    print("=" * 60)
+    print("=" * 100)
+    print("房源列表（按爬取顺序）")
+    print("=" * 100)
+    
     house_list = soup.find('ul', {'class': 'sellListContent'})
     if house_list:
         items = house_list.find_all('li', recursive=False)
-        print(f"✅ 找到 {len(items)} 个房源\n")
+        print(f"\n✅ 找到 {len(items)} 个房源\n")
+        
+        # 按顺序遍历每个房源
+        for idx, house_item in enumerate(items, 1):
+            try:
+                info_div = house_item.find('div', {'class': 'info'}, recursive=False)
+                if not info_div:
+                    continue
+                
+                # 标题 + 房源ID
+                title_div = info_div.find('div', {'class': 'title'}, recursive=False)
+                title_link = title_div.find('a') if title_div else None
+                title = title_link.get_text(strip=True) if title_link else "未知"
+                house_code = title_link.get('data-housecode', '未知') if title_link else '未知'
+                
+                # 位置信息：info > flood > positionInfo > a
+                position_text = "未知"
+                flood_div = info_div.find('div', {'class': 'flood'}, recursive=False)
+                if flood_div:
+                    position_info_div = flood_div.find('div', {'class': 'positionInfo'}, recursive=False)
+                    if position_info_div:
+                        position_links = position_info_div.find_all('a')
+                        if position_links:
+                            position_text = " - ".join([a.get_text(strip=True) for a in position_links])
+                
+                # 地址（原始字符串）
+                address_div = info_div.find('div', {'class': 'address'}, recursive=False)
+                address_raw = address_div.get_text(strip=True) if address_div else "未知"
+                
+                # 价格
+                price_info = info_div.find('div', {'class': 'priceInfo'}, recursive=False)
+                total_price_div = price_info.find('div', {'class': 'totalPrice'}, recursive=False) if price_info else None
+                unit_price_div = price_info.find('div', {'class': 'unitPrice'}, recursive=False) if price_info else None
+                
+                total_price_text = total_price_div.find('span').get_text(strip=True) if total_price_div and total_price_div.find('span') else "未知"
+                unit_price_text = unit_price_div.find('span').get_text(strip=True) if unit_price_div and unit_price_div.find('span') else "未知"
+                
+                # 打印房源信息
+                print(f"[{idx:2d}] ID:{house_code} | {title}")
+                print(f"     位置: {position_text}")
+                print(f"     价格: {total_price_text}  |  单价: {unit_price_text}")
+                print(f"     详情: {address_raw}")
+                print()
+                
+            except Exception as e:
+                logger.debug(f"解析房源失败: {e}")
+                continue
     else:
-        print("❌ 未找到房源列表\n")
-    
-    print("=" * 60)
-    print("2️⃣  检查标题")
-    print("=" * 60)
-    titles = soup.find_all('div', {'class': 'title'}, limit=5)
-    if titles:
-        print(f"✅ 找到 {len(titles)} 个标题")
-        for i, t in enumerate(titles[:3]):
-            print(f"  {i}: {t.get_text(strip=True)[:50]}")
-        print()
-    else:
-        print("❌ ���找到标题\n")
-    
-    print("=" * 60)
-    print("3️⃣  检查价格")
-    print("=" * 60)
-    prices = soup.find_all('div', {'class': 'totalPrice'}, limit=5)
-    if prices:
-        print(f"✅ 找到 {len(prices)} 个价格")
-        for i, p in enumerate(prices[:3]):
-            print(f"  {i}: {p.get_text(strip=True)}")
-        print()
-    else:
-        print("❌ 未找到价格\n")
-    
-    print("=" * 60)
-    print("4️⃣  检查地址")
-    print("=" * 60)
-    addresses = soup.find_all('div', {'class': 'address'}, limit=5)
-    if addresses:
-        print(f"✅ 找到 {len(addresses)} 个地址")
-        for i, a in enumerate(addresses[:3]):
-            print(f"  {i}: {a.get_text(strip=True)[:60]}")
-        print()
-    else:
-        print("❌ 未找到地址\n")
+        print("❌ 未找到房源列表")
 
 except Exception as e:
     logger.error(f"❌ 加载失败: {e}")
     import traceback
     traceback.print_exc()
+
+finally:
+    input("\n按 Enter 关闭浏览器...")
+    driver.quit()
+    logger.info("✅ 浏览器已关闭")
