@@ -1,86 +1,86 @@
-import requests
-from bs4 import BeautifulSoup
 import logging
 import time
-import json
 from typing import List, Dict
-from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LianjiaScraperBase:
-    """链家数据爬虫 - 改进版"""
+    """链家数据爬虫 - 使用远程 Chrome 调试端口"""
     
-    def __init__(self, delay: float = 2.0, max_retries: int = 3):
+    def __init__(self, debug_port: int = 9222, delay: float = 2.0):
         """
         初始化爬虫
+        debug_port: Chrome 远程调试端口
         delay: 请求间隔（秒）
-        max_retries: 最大重试次数
         """
         self.base_url = 'https://bj.lianjia.com'
-        self.ershoufang_url = self.base_url + '/ershoufang'
         self.delay = delay
-        self.max_retries = max_retries
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://bj.lianjia.com/ershoufang/'
-        })
         
-        # 区代码映射
-        self.district_map = {
-            'chaoyang': '朝阳区',
-            'dongcheng': '东城区',
-            'xicheng': '西城区',
-            'haidian': '海淀区',
-            'fengtai': '丰台区',
-            'shijingshan': '石景山区',
-            'daxing': '大兴区',
-            'tongzhou': '通州区',
-        }
+        # 连接到远程调试端口
+        options = webdriver.ChromeOptions()
+        options.add_experimental_option('debuggerAddress', f'127.0.0.1:{debug_port}')
+        
+        try:
+            self.driver = webdriver.Chrome(options=options)
+            logger.info(f"✅ 已连接到远程 Chrome (端口: {debug_port})")
+        except Exception as e:
+            logger.error(f"❌ 连接失败: {e}")
+            logger.info("请先启动: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222")
+            raise
     
-    def request_get(self, url: str) -> str:
-        """发送请求，带重试机制"""
-        for attempt in range(self.max_retries):
-            try:
-                logger.info(f"[尝试 {attempt+1}/{self.max_retries}] 请求: {url}")
-                response = self.session.get(url, timeout=15)
-                response.encoding = 'utf-8'
-                
-                if response.status_code == 200:
-                    time.sleep(self.delay)
-                    return response.text
-                else:
-                    logger.warning(f"状态码 {response.status_code}，等待后重试...")
-                    time.sleep(self.delay * 2)
-                    
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"请求异常: {e}，等待后重试...")
-                time.sleep(self.delay * 2)
+    def fetch_listings(self, district: str, page: int = 1) -> List[Dict]:
+        """获取房源列表"""
+        url = f'{self.base_url}/ershoufang/pg{page}l2rs{district}/'
         
-        logger.error(f"请求失败: {url}")
-        return ""
+        try:
+            logger.info(f"🌐 加载: {url}")
+            self.driver.get(url)
+            
+            # 等待房源列表加载
+            wait = WebDriverWait(self.driver, 15)
+            wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'sellListContent')))
+            
+            logger.info(f"✅ 页面加载完成")
+            time.sleep(self.delay)
+            
+            # 获取 HTML
+            html = self.driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # 提取数据
+            data = self.extract_information(soup)
+            return data
+            
+        except Exception as e:
+            logger.error(f"❌ 加载失败: {e}")
+            return []
     
     def extract_information(self, soup: BeautifulSoup) -> List[Dict]:
-        """从 HTML 提取房源信息"""
+        """提取房源信息"""
         data = []
         
         try:
-            # 查找房源列表容器
             house_list = soup.find('ul', {'class': 'sellListContent'})
             if not house_list:
-                logger.warning("未找到房源列表")
+                logger.warning("��� 未找到房源列表")
                 return data
             
-            # 遍历每个房源
-            for house_item in house_list.find_all('li', recursive=False):
+            items = house_list.find_all('li', recursive=False)
+            logger.info(f"📦 找到 {len(items)} 个房源")
+            
+            for house_item in items:
                 try:
                     info_div = house_item.find('div', {'class': 'info'}, recursive=False)
                     if not info_div:
                         continue
                     
-                    # ========== 标题和ID ==========
+                    # ===== 标题 + 房源ID =====
                     title_div = info_div.find('div', {'class': 'title'}, recursive=False)
                     if not title_div:
                         continue
@@ -88,156 +88,132 @@ class LianjiaScraperBase:
                     if not title_link:
                         continue
                     
-                    house_title = title_link.get_text(strip=True)
-                    house_id = title_link.get('href', '').split('/')[-1].replace('.html', '')
+                    title = title_link.get_text(strip=True)
+                    house_code = title_link.get('data-housecode', '')
                     
-                    # ========== 位置信息 ==========
+                    # ===== 位置信息：info > flood > positionInfo > a =====
+                    position_text = '未知'
                     flood_div = info_div.find('div', {'class': 'flood'}, recursive=False)
-                    house_location = '未知'
                     if flood_div:
-                        location_link = flood_div.find('a')
-                        if location_link:
-                            house_location = location_link.get_text(strip=True)
+                        position_info_div = flood_div.find('div', {'class': 'positionInfo'}, recursive=False)
+                        if position_info_div:
+                            position_links = position_info_div.find_all('a')
+                            if position_links:
+                                position_text = ' - '.join([a.get_text(strip=True) for a in position_links])
                     
-                    # ========== 详细信息 ==========
+                    # ===== 地址信息（原始字符串）=====
                     address_div = info_div.find('div', {'class': 'address'}, recursive=False)
                     if not address_div:
                         continue
                     
-                    address_parts = [p.strip() for p in address_div.get_text(strip=True).split('|')]
+                    address_raw = address_div.get_text(strip=True)
                     
-                    house_type = address_parts[0] if len(address_parts) > 0 else '未知'
-                    house_size = address_parts[1] if len(address_parts) > 1 else '未知'
-                    house_towards = address_parts[2] if len(address_parts) > 2 else '未知'
-                    house_flood = address_parts[3] if len(address_parts) > 3 else '未知'
-                    house_year = address_parts[4] if len(address_parts) > 4 else '未知'
-                    house_building = address_parts[5] if len(address_parts) > 5 else '未知'
-                    
-                    # ========== 价格信息 ==========
+                    # ===== 价格信息 =====
                     price_info = info_div.find('div', {'class': 'priceInfo'}, recursive=False)
-                    house_total_price = '未知'
-                    house_unit_price = '未知'
+                    if not price_info:
+                        continue
                     
-                    if price_info:
-                        total_price_div = price_info.find('div', {'class': 'totalPrice'}, recursive=False)
-                        if total_price_div:
-                            total_price_span = total_price_div.find('span')
-                            if total_price_span:
-                                house_total_price = total_price_span.get_text(strip=True)
-                        
-                        unit_price_div = price_info.find('div', {'class': 'unitPrice'}, recursive=False)
-                        if unit_price_div:
-                            unit_price_span = unit_price_div.find('span')
-                            if unit_price_span:
-                                unit_price_text = unit_price_span.get_text(strip=True)
-                                # 提取数字，格式: "12345元/m²"
-                                house_unit_price = unit_price_text.replace('元/m²', '').strip()
+                    total_price_div = price_info.find('div', {'class': 'totalPrice'}, recursive=False)
+                    unit_price_div = price_info.find('div', {'class': 'unitPrice'}, recursive=False)
                     
-                    # ========== 数据格式化 ==========
-                    # 提取面积数字
+                    if not (total_price_div and unit_price_div):
+                        continue
+                    
+                    total_price_span = total_price_div.find('span')
+                    unit_price_span = unit_price_div.find('span')
+                    
+                    if not (total_price_span and unit_price_span):
+                        continue
+                    
+                    total_price_text = total_price_span.get_text(strip=True)
+                    unit_price_text = unit_price_span.get_text(strip=True)
+                    
+                    # 提取数字
                     try:
-                        area = float(house_size.replace('m²', '').strip())
-                    except:
-                        area = 0
-                    
-                    # 提取总价数字
-                    try:
-                        price = float(house_total_price.replace('万', '').strip())
+                        price = float(total_price_text.replace('万', '').strip())
                     except:
                         price = 0
                     
-                    # 提取单价数字
                     try:
-                        unit_price = float(house_unit_price)
+                        unit_price = float(unit_price_text.replace('元/m²', '').strip())
                     except:
                         unit_price = 0
+                    
+                    # 提取面积（从地址原始字符串中）
+                    import re
+                    area = 0
+                    area_match = re.search(r'(\d+\.?\d*)m²', address_raw)
+                    if area_match:
+                        area = float(area_match.group(1))
                     
                     # 只保存有效数据
                     if area > 0 and price > 0 and unit_price > 0:
                         data.append({
-                            'title': house_title,
-                            'price': price,
-                            'area': area,
-                            'unit_price': unit_price,
-                            'house_type': house_type,
-                            'towards': house_towards,
-                            'floor': house_flood,
-                            'year': house_year,
-                            'building': house_building,
-                            'location': house_location,
-                            'house_id': house_id,
+                            'house_code': house_code,          # 房源ID
+                            'title': title,                    # 房源标题
+                            'position': position_text,         # 位置信息
+                            'price': price,                    # 总价（万）
+                            'area': area,                      # 面积（平米）
+                            'unit_price': unit_price,          # 单价（元/m²）
+                            'address_raw': address_raw,        # 原始地址字符串
                             'source': 'lianjia'
                         })
-                    
+                
                 except Exception as e:
-                    logger.debug(f"解析单个房源失败: {e}")
+                    logger.debug(f"解析房源失败: {e}")
                     continue
             
-            logger.info(f"成功提取 {len(data)} 条房源")
+            logger.info(f"✅ 提取 {len(data)} 条有效房源")
             return data
             
         except Exception as e:
-            logger.error(f"提取信息失败: {e}")
+            logger.error(f"提取失败: {e}")
             return data
     
-    def fetch_listings(self, district: str, page: int = 1) -> List[Dict]:
-        """获取房源列表"""
-        url = f'{self.ershoufang_url}/pg{page}l2rs{district}/'
-        
-        html = self.request_get(url)
-        if not html:
-            return []
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        return self.extract_information(soup)
-    
-    def get_total_pages(self, district: str) -> int:
-        """获取总页数"""
-        url = f'{self.ershoufang_url}/l2rs{district}/'
-        
-        html = self.request_get(url)
-        if not html:
-            return 0
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        try:
-            page_box = soup.find('div', {'class': 'page-box'})
-            if page_box and page_box.find('div'):
-                page_data = page_box.find('div').get('page-data')
-                if page_data:
-                    page_json = json.loads(page_data)
-                    return page_json.get('totalPage', 1)
-        except Exception as e:
-            logger.warning(f"获取总页数失败: {e}")
-        
-        return 1
-    
-    def fetch_all_districts(self, pages_per_district: int = 3) -> Dict[str, List[Dict]]:
+    def fetch_all_districts(self, pages_per_district: int = 2) -> Dict[str, List[Dict]]:
         """获取所有区的房源"""
+        districts_cn = {
+            '朝阳': '朝阳区',
+            '东城': '东城区',
+            '西城': '西城区',
+            '海淀': '海淀区',
+            '丰台': '丰台区',
+            '石景山': '石景山区',
+            '大兴': '大兴区',
+            '通州': '通州区',
+        }
+        
         results = {}
         
-        for district_code, district_name in self.district_map.items():
-            logger.info(f"\n{'='*60}")
-            logger.info(f"开始爬取 {district_name}")
-            logger.info(f"{'='*60}")
-            
-            all_listings = []
-            total_pages = self.get_total_pages(district_code)
-            max_pages = min(pages_per_district, total_pages)
-            
-            logger.info(f"总页数: {total_pages}, 计划爬取: {max_pages} 页")
-            
-            for page in range(1, max_pages + 1):
-                logger.info(f"爬取第 {page}/{max_pages} 页...")
-                listings = self.fetch_listings(district_code, page)
-                all_listings.extend(listings)
+        try:
+            for district_code, district_name in districts_cn.items():
+                logger.info(f"\n{'='*60}")
+                logger.info(f"爬取 {district_name}")
+                logger.info(f"{'='*60}")
                 
-                if not listings:
-                    logger.warning(f"第 {page} 页无数据，停止爬取")
-                    break
-            
-            results[district_code] = all_listings
-            logger.info(f"{district_name} 共爬取 {len(all_listings)} 条房源\n")
+                all_listings = []
+                
+                for page in range(1, pages_per_district + 1):
+                    logger.info(f"第 {page}/{pages_per_district} 页...")
+                    listings = self.fetch_listings(district_code, page)
+                    all_listings.extend(listings)
+                    
+                    if not listings:
+                        logger.warning(f"第 {page} 页无数据，停止")
+                        break
+                
+                results[district_code] = all_listings
+                logger.info(f"{district_name} 共 {len(all_listings)} 条房源\n")
+        
+        except Exception as e:
+            logger.error(f"爬取失败: {e}")
         
         return results
+    
+    def __del__(self):
+        """析构函数"""
+        try:
+            if hasattr(self, 'driver'):
+                self.driver.quit()
+        except:
+            pass
