@@ -1,17 +1,45 @@
-# 忽略虚拟环境
+# 密钥 & 环境变量
+.env
+
+# 虚拟环境
 venv/
 .venv/
 env/
 
-# 忽略本地数据（保护隐私 & 防止大文件报错）
-data/
-*.db
-*.csv
-
-# 忽略 Python 缓存
+# Python 缓存 & 编译
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
 
-# 忽略系统文件
+# 系统文件
 .DS_Store
+Thumbs.db
+
+# IDE
 .vscode/
+.idea/
+
+# 数据库 & Docker 数据卷
+*.db
+*.sqlite
+pgdata/
+
+# Metabase 应用数据（导出文件除外）
+metabase-data/
+!metabase-data/export/
+!metabase-data/api.json
+!metabase-data/api.html
+
+# 本地数据
+data/
+*.csv
+
+# 分发
+dist/
+build/
+*.egg-info/
+
+# Claude 内部
+.claude/
