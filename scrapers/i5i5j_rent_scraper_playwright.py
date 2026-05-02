@@ -100,10 +100,10 @@ class I5I5JRentScraperPlaywright:
     @staticmethod
     def _parse_title_and_id(list_con):
         """提取标题和租房房源ID，返回 (title, house_code)"""
-        title_h3 = list_con.find('h3', {'class': 'listTit'})
-        if not title_h3:
+        title_tag = list_con.find(['h2', 'h3'], class_='listTit')
+        if not title_tag:
             return None, None
-        title_link = title_h3.find('a')
+        title_link = title_tag.find('a')
         if not title_link:
             return None, None
         title = title_link.get_text(strip=True)
@@ -125,7 +125,7 @@ class I5I5JRentScraperPlaywright:
         for part in info_parts:
             if ('室' in part or '房间' in part) and '地下' not in part:
                 layout = part
-            elif '平米' in part:
+            elif '平米' in part or '㎡' in part:
                 m = re.search(r'(\d+\.?\d*)', part)
                 if m:
                     try:
@@ -194,27 +194,33 @@ class I5I5JRentScraperPlaywright:
         return datetime.now().strftime('%Y-%m-%d')
 
     @staticmethod
-    def _parse_rent_price(jia_div):
-        """提取月租金，返回 rent_price 或 None"""
-        price_p = jia_div.find('p', {'class': 'redC'})
-        if not price_p:
-            return None
-        price_text = price_p.get_text(strip=True).replace('元/月', '').replace(',', '').strip()
-        try:
-            return float(price_text)
-        except (ValueError, TypeError):
-            return None
+    def _parse_rent_price_and_type(jia_div):
+        """从 jia div 提取月租金和出租方式，返回 (rent_price, rent_type)"""
+        jia_text = jia_div.get_text(strip=True)
+        if not jia_text:
+            return None, '整租'
 
-    @staticmethod
-    def _parse_rent_type(list_con):
-        """提取整租/合租类型"""
-        # 标题中通常包含整租/合租
-        title_h3 = list_con.find('h3', {'class': 'listTit'})
-        if title_h3:
-            title_text = title_h3.get_text(strip=True)
-            if '合租' in title_text or '合住' in title_text:
-                return '合租'
-        return '整租'
+        # 提取类型: "出租方式：整租" or "出租方式：合租"
+        rent_type = '整租'
+        type_m = re.search(r'出租方式[：:]\s*(.+)', jia_text)
+        if type_m:
+            t = type_m.group(1).strip()
+            if '合' in t:
+                rent_type = '合租'
+
+        # 提取价格: strong 标签里的数字，或匹配 数字+元/月
+        strong = jia_div.find('strong')
+        if strong:
+            try:
+                return float(strong.get_text(strip=True).replace(',', '').strip()), rent_type
+            except (ValueError, TypeError):
+                pass
+
+        price_m = re.search(r'(\d+)\s*元/月', jia_text)
+        if price_m:
+            return float(price_m.group(1)), rent_type
+
+        return None, rent_type
 
     @classmethod
     def extract_information(cls, soup):
@@ -266,11 +272,9 @@ class I5I5JRentScraperPlaywright:
                     jia_div = list_x.find('div', {'class': 'jia'})
                     if not jia_div:
                         continue
-                    rent_price = cls._parse_rent_price(jia_div)
+                    rent_price, rent_type = cls._parse_rent_price_and_type(jia_div)
                     if rent_price is None:
                         continue
-
-                    rent_type = cls._parse_rent_type(list_con)
 
                     if info['area'] is not None and info['area'] > 0 and rent_price > 0:
                         data.append({
