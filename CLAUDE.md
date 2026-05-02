@@ -12,16 +12,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Start infrastructure
 docker-compose up -d
 
-# Start Chrome with remote debugging
+# Start Chrome with remote debugging（手动）
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
   --remote-debugging-port=9223 \
   --user-data-dir="/tmp/chrome_9223" \
   --blink-settings=imagesEnabled=false
 
-# Run crawler
+# Run all crawlers（自动拉起 Chrome，先二手房后租房）
 source venv/bin/activate
-python run_crawler_playwright.py              # all 6 districts
-python run_crawler_playwright.py -r 0 1 2     # specific districts
+python run_all.py                             # 全量：二手房 → 租房
+python run_all.py -r 0 1 2                    # 指定区域
+python run_all.py --sale-only                 # 只要二手房
+python run_all.py --rent-only                 # 只要租房
+
+# 单独跑
+python run_crawler_playwright.py              # 二手房 only
+python run_crawler_rent.py                    # 租房 only
 
 # Install deps
 pip install -r requirements.txt
