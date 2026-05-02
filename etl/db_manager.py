@@ -705,3 +705,179 @@ class DatabaseManager:
             return pd.DataFrame()
         finally:
             self._return_connection(conn)
+
+    # ================================================================
+    # 租房相关
+    # ================================================================
+
+    def batch_insert_rental_details(self, rentals):
+        """批量插入租房详情"""
+        if not rentals:
+            return
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            from psycopg2.extras import execute_values
+
+            today = datetime.now().date()
+            values = []
+
+            for r in rentals:
+                cursor.execute('SELECT first_seen_date FROM rental_details WHERE house_id = %s', (r['house_id'],))
+                result = cursor.fetchone()
+
+                if result:
+                    cursor.execute('''
+                        UPDATE rental_details
+                        SET title = %s, region = %s, biz_circle = %s, community = %s, community_id = %s,
+                            layout = %s, area = %s, rent_price = %s, rent_type = %s,
+                            orientation = %s, decoration = %s, floor_info = %s,
+                            last_seen_date = %s, status = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE house_id = %s
+                    ''', (r['title'], r['region'], r['biz_circle'], r['community'],
+                          r.get('community_id'), r['layout'], r['area'], r['rent_price'],
+                          r.get('rent_type', '整租'), r['orientation'], r['decoration'],
+                          r['floor_info'], today, r['house_id']))
+                else:
+                    values.append((
+                        r['house_id'], r.get('community_id'), r['title'], r['region'],
+                        r['biz_circle'], r['community'], r['layout'], r['area'],
+                        r['rent_price'], r.get('rent_type', '整租'), r['orientation'],
+                        r['decoration'], r['floor_info'], today, today, 1
+                    ))
+
+            if values:
+                execute_values(cursor, '''
+                    INSERT INTO rental_details
+                    (house_id, community_id, title, region, biz_circle, community,
+                     layout, area, rent_price, rent_type, orientation, decoration,
+                     floor_info, first_seen_date, last_seen_date, status)
+                    VALUES %s
+                    ON CONFLICT (house_id) DO NOTHING
+                ''', values)
+
+            conn.commit()
+            logger.info(f"批量插入/更新 {len(rentals)} 条租房房源")
+        except Exception as e:
+            logger.error(f"批量插入租房详情失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def batch_insert_rent_history(self, prices):
+        """批量插入租金变动"""
+        if not prices:
+            return
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            from psycopg2.extras import execute_values
+            values = [(p['house_id'], p['rent_price'], p['record_date']) for p in prices]
+            execute_values(cursor, '''
+                INSERT INTO rent_history (house_id, rent_price, record_date)
+                VALUES %s
+            ''', values)
+            conn.commit()
+            logger.info(f"批量插入 {len(prices)} 条租金变动记录")
+        except Exception as e:
+            logger.error(f"批量插入租金变动失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def insert_district_rent_snapshot(self, record_date, region, total_rentals,
+                                       avg_rent_price, median_rent_price, avg_unit_rent):
+        """插入区域租赁快照"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO district_rent_snapshots
+                (record_date, region, total_rentals, avg_rent_price, median_rent_price, avg_unit_rent)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (record_date, region) DO UPDATE
+                SET total_rentals = EXCLUDED.total_rentals,
+                    avg_rent_price = EXCLUDED.avg_rent_price,
+                    median_rent_price = EXCLUDED.median_rent_price,
+                    avg_unit_rent = EXCLUDED.avg_unit_rent
+            ''', (record_date, region, total_rentals, avg_rent_price, median_rent_price, avg_unit_rent))
+            conn.commit()
+            logger.info(f"成功插入区域租赁快照: {record_date} - {region}")
+        except Exception as e:
+            logger.error(f"插入区域租赁快照失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def compute_community_metrics(self, record_date):
+        """计算指定日期的小区级租售联动指标"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO community_metrics
+                (record_date, community_id, community, region, biz_circle,
+                 sale_count, avg_sale_price, avg_sale_unit_price,
+                 rental_count, avg_rent_price, avg_rent_unit_price,
+                 price_rent_ratio, rental_yield)
+                SELECT
+                    %s AS record_date,
+                    COALESCE(s.community_id, r.community_id) AS community_id,
+                    COALESCE(s.community, r.community) AS community,
+                    COALESCE(s.region, r.region) AS region,
+                    COALESCE(s.biz_circle, r.biz_circle) AS biz_circle,
+                    s.sale_count,
+                    s.avg_sale_price,
+                    s.avg_sale_unit_price,
+                    r.rental_count,
+                    r.avg_rent_price,
+                    r.avg_rent_unit_price,
+                    CASE WHEN r.avg_rent_price > 0
+                         THEN ROUND((s.avg_sale_price * 10000) / (r.avg_rent_price * 12)::numeric, 0)
+                    END AS price_rent_ratio,
+                    CASE WHEN s.avg_sale_price > 0
+                         THEN ROUND((r.avg_rent_price * 12) / (s.avg_sale_price * 10000) * 100, 2)
+                    END AS rental_yield
+                FROM (
+                    SELECT community_id, community, region, biz_circle,
+                           COUNT(*) AS sale_count,
+                           ROUND(AVG(price)) AS avg_sale_price,
+                           ROUND(AVG(unit_price)) AS avg_sale_unit_price
+                    FROM property_details
+                    WHERE status = 1 AND community_id IS NOT NULL
+                    GROUP BY community_id, community, region, biz_circle
+                ) s
+                FULL OUTER JOIN (
+                    SELECT community_id, community, region, biz_circle,
+                           COUNT(*) AS rental_count,
+                           ROUND(AVG(rent_price)) AS avg_rent_price,
+                           ROUND(AVG(rent_price / NULLIF(area, 0))) AS avg_rent_unit_price
+                    FROM rental_details
+                    WHERE status = 1 AND community_id IS NOT NULL
+                    GROUP BY community_id, community, region, biz_circle
+                ) r ON s.community_id = r.community_id
+                ON CONFLICT (record_date, community_id) DO UPDATE
+                SET community = EXCLUDED.community,
+                    region = EXCLUDED.region,
+                    biz_circle = EXCLUDED.biz_circle,
+                    sale_count = EXCLUDED.sale_count,
+                    avg_sale_price = EXCLUDED.avg_sale_price,
+                    avg_sale_unit_price = EXCLUDED.avg_sale_unit_price,
+                    rental_count = EXCLUDED.rental_count,
+                    avg_rent_price = EXCLUDED.avg_rent_price,
+                    avg_rent_unit_price = EXCLUDED.avg_rent_unit_price,
+                    price_rent_ratio = EXCLUDED.price_rent_ratio,
+                    rental_yield = EXCLUDED.rental_yield
+            ''', (record_date,))
+            conn.commit()
+            logger.info(f"社区租售联动指标计算完成: {record_date}")
+        except Exception as e:
+            logger.error(f"计算社区租售联动指标失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
