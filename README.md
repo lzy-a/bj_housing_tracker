@@ -1,6 +1,6 @@
 # 北京二手房数据监控
 
-针对北京城六区二手房市场的长期数据监控，每日自动采集我爱我家（5i5j）房源数据，通过 PostgreSQL + Metabase 进行存储和可视化。
+每日自动采集我爱我家（5i5j）北京城六区的二手房挂牌和租房数据，PostgreSQL 存储 + Metabase 可视化。
 
 ## 快速启动
 
@@ -8,104 +8,110 @@
 # 1. 启动 Docker（PostgreSQL + Metabase）
 docker-compose up -d
 
-# 2. 启动 Chrome 远程调试
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9223 \
-  --user-data-dir="/tmp/chrome_9223" \
-  --blink-settings=imagesEnabled=false
-
-# 3. 激活虚拟环境并运行爬虫
+# 2. 一键全量爬取（自动拉起 Chrome，先二手房后租房）
 source venv/bin/activate
-python run_crawler_playwright.py          # 全量爬取城六区
-python run_crawler_playwright.py -r 1 4   # 只爬西城和丰台
+python run_all.py                    # 全部 6 区
+python run_all.py -r 0 1 2           # 指定区域
+python run_all.py --sale-only        # 只爬二手房
+python run_all.py --rent-only        # 只爬租房
 
-# 4. 访问 Metabase 看板
+# 3. 访问 Metabase
 # http://localhost:3000
 ```
 
+## 架构
+
+```
+run_all.py                              → 一键调度：自动检测/拉起 Chrome → 二手房 → 租房
+run_crawler_playwright.py               → 二手房爬虫（CDP 多标签异步）
+run_crawler_rent.py                     → 租房爬虫（同上架构）
+scrapers/i5i5j_scraper_playwright.py    → 二手房页面解析
+scrapers/i5i5j_rent_scraper_playwright.py → 租房页面解析
+etl/db_manager.py                       → 全部 DB 操作（建表 / 批量写入 / 快照 / 社区指标）
+config/settings.py                      → 配置（读取 .env）
+```
+
+**数据流**：Chrome CDP → Playwright 多 tab 并发抓取 → BeautifulSoup 解析 → Queue → DB consumer 批量写入
+
+**状态生命周期**：爬取前整区置为 status=2（待确认）→ 爬取中抓到的置为 1 → 爬取后仍为 2 的置为 0（下架/下租）
+
 ## 配置
 
-数据库连接和爬虫参数通过 `.env` 文件统一管理，`config/settings.py` 负责读取并提供默认值。
+`.env` 文件：
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DB_HOST` / `DB_PORT` / `DB_NAME` | PostgreSQL 连接 | localhost / 5432 / house_data |
-| `DB_USER` / `DB_PASSWORD` | 数据库凭据 | mb_admin / — |
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `DB_HOST/PORT/NAME/USER/PASSWORD` | PostgreSQL | localhost:5432/house_data |
 | `CHROME_DEBUG_PORT` | Chrome 远程调试端口 | 9223 |
-| `I5I5J_PHONE` / `I5I5J_PASSWORD` | 我爱我家登录凭据 | — |
+| `I5I5J_PHONE/PASSWORD` | 我爱我家登录 | — |
 
 ## 区域编号
 
-| 编号 | 区域 | 拼音代码 | 5i5j URL |
-|------|------|----------|----------|
-| 0 | 东城区 | dongchengqu | https://bj.5i5j.com/ershoufang/dongchengqu/ |
-| 1 | 西城区 | xichengqu | https://bj.5i5j.com/ershoufang/xichengqu/ |
-| 2 | 海淀区 | haidianqu | https://bj.5i5j.com/ershoufang/haidianqu/ |
-| 3 | 朝阳区 | chaoyangqu | https://bj.5i5j.com/ershoufang/chaoyangqu/ |
-| 4 | 丰台区 | fengtaiqu | https://bj.5i5j.com/ershoufang/fengtaiqu/ |
-| 5 | 石景山区 | shijingshanqu | https://bj.5i5j.com/ershoufang/shijingshanqu/ |
+| 编号 | 区域 | 拼音 |
+|------|------|------|
+| 0 | 东城区 | dongchengqu |
+| 1 | 西城区 | xichengqu |
+| 2 | 海淀区 | haidianqu |
+| 3 | 朝阳区 | chaoyangqu |
+| 4 | 丰台区 | fengtaiqu |
+| 5 | 石景山区 | shijingshanqu |
 
-## 数据库表设计
+## 数据库表
 
-以下表结构由 `etl/db_manager.py` 中的 `_init_db()` 自动创建。
+以下由 `etl/db_manager.py` 的 `_init_db()` 自动创建。
 
-### 1. 房源详情主表 (`property_details`)
+### 二手房
+
+#### property_details — 房源主表
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| house_id | VARCHAR(20) UNIQUE | 房源唯一ID（主键） |
-| title | TEXT | 房源标题 |
-| region | VARCHAR(50) | 行政区 |
-| biz_circle | VARCHAR(50) | 商圈 |
-| community | VARCHAR(100) | 小区名 |
-| layout | VARCHAR(20) | 户型（如 2室1厅） |
-| area | FLOAT | 面积（㎡） |
-| price | FLOAT | 总价（万） |
-| unit_price | FLOAT | 单价（元/㎡） |
-| orientation | VARCHAR(20) | 朝向 |
-| decoration | VARCHAR(20) | 装修程度 |
-| floor_info | VARCHAR(50) | 楼层信息 |
-| building_type | VARCHAR(50) | 建筑类型（板楼/塔楼） |
+| house_id | VARCHAR(20) UNIQUE | 房源 ID |
+| community / community_id | VARCHAR | 小区名 / 5i5j 小区物理 ID（租售关联桥梁） |
+| region / biz_circle | VARCHAR(50) | 行政区 / 商圈 |
+| layout / area | VARCHAR(20) / FLOAT | 户型 / 面积 |
+| price / unit_price | FLOAT | 总价(万) / 单价(元/㎡) |
+| orientation / decoration / floor_info | VARCHAR | 朝向 / 装修 / 楼层 |
 | build_year | INTEGER | 建筑年代 |
-| address_raw | TEXT | 原始地址字符串 |
-| first_seen_date | DATE | 首次入库日期 |
-| last_seen_date | DATE | 最后一次被抓取到的日期 |
-| last_update_date | DATE | 网页显示的最后更新日期 |
-| status | INTEGER | 1=在售, 0=下架, 2=待确认 |
+| first_seen_date / last_seen_date | DATE | 首次入库 / 最后出现日期 |
+| status | INTEGER | 1=在售 0=下架 |
 
-**状态生命周期**：爬取前整区置为 2（待确认）→ 爬取中抓到的置为 1（在售）→ 爬取后仍为 2 的置为 0（下架）。
+#### price_history — 价格变动（仅在价格变化时写入）
 
-### 2. 价格历史轨迹表 (`price_history`)
+### 租房
 
-仅在价格变动时插入新记录。
+#### rental_details — 租房主表
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| house_id | VARCHAR(20) | 房源ID |
-| price | FLOAT | 变动后的总价（万） |
-| unit_price | FLOAT | 变动后的单价（元/㎡） |
-| record_date | DATE | 抓取到变动的日期 |
+镜像 `property_details`，差异字段：
 
-### 3. 每日区域大盘表 (`district_snapshots`)
+| 字段 | 说明 |
+|------|------|
+| rent_price | 月租金（元） |
+| rent_type | 整租 / 合租 |
 
-每天爬取后计算一次，唯一键 `(record_date, region)`。
+#### rent_history — 租金变动
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| record_date | DATE | 爬取日期 |
-| region | VARCHAR(50) | 区域 |
-| total_listings | INTEGER | 在售房源总数 |
-| avg_unit_price | FLOAT | 简单均价（算术平均） |
-| median_unit_price | FLOAT | 中位数单价 |
-| weighted_avg_price | FLOAT | 资产平米价（总价÷总面积） |
+### 大盘 & 联动
 
-### 4. 社区信息表 (`community_info`)
+#### district_snapshots / district_rent_snapshots — 每日区域均价/租金快照
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| community | VARCHAR(100) UNIQUE | 小区名 |
-| region | VARCHAR(50) | 区域 |
-| town_id | VARCHAR(20) | 乡镇ID |
-| town_name | VARCHAR(50) | 乡镇名称 |
-| longitude | FLOAT | 经度 |
-| latitude | FLOAT | 纬度 |
+#### community_metrics — 小区级租售联动（每日预计算）
+
+| 指标 | 说明 |
+|------|------|
+| price_rent_ratio | 售租比 = 总价 / (月租金 × 12)，即回本年限 |
+| rental_yield | 租金回报率 = 年租金 / 总价 × 100% |
+
+通过 `community_id` 关联同一小区在售和在租房源，避免看板每次 JOIN 两张主表。
+
+## Metabase 看板
+
+`metabase-data/export/` 保存了完整看板配置，包含三 tab：
+
+| Tab | 内容 |
+|-----|------|
+| 行政区 | 大盘指标、梯队排名、供需变化、涨跌排名（联动行政区筛选器） |
+| 板块 | 商圈级分析（详情/走势/均价/户型/挂牌量，联动板块筛选器） |
+| 小区 | 小区级分析（同上结构，联动小区筛选器） |
+
+筛选器支持 crossfilter 联动点击：板块名 → 板块筛选器、小区名 → 小区筛选器、户型 → 户型筛选器。
