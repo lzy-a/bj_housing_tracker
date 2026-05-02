@@ -196,28 +196,6 @@ class DatabaseManager:
             )
         ''')
 
-        # 8. 小区级租售联动表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS community_metrics (
-                id SERIAL PRIMARY KEY,
-                record_date DATE NOT NULL,
-                community_id VARCHAR(20),
-                community VARCHAR(100) NOT NULL,
-                region VARCHAR(50) NOT NULL,
-                biz_circle VARCHAR(50),
-                sale_count INTEGER,
-                avg_sale_price FLOAT,
-                avg_sale_unit_price FLOAT,
-                rental_count INTEGER,
-                avg_rent_price FLOAT,
-                avg_rent_unit_price FLOAT,
-                price_rent_ratio FLOAT,
-                rental_yield FLOAT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(community_id)
-            )
-        ''')
-
         # 租赁相关索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_details_house_id ON rental_details(house_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_details_region ON rental_details(region)')
@@ -226,8 +204,6 @@ class DatabaseManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_rent_history_record_date ON rent_history(record_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_rent_snapshots_date ON district_rent_snapshots(record_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_rent_snapshots_region ON district_rent_snapshots(region)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_metrics_date ON community_metrics(record_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_metrics_community_id ON community_metrics(community_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_property_details_community_id ON property_details(community_id)')
 
         # 加速看板查询的复合索引
@@ -813,71 +789,3 @@ class DatabaseManager:
             cursor.close()
             self._return_connection(conn)
 
-    def compute_community_metrics(self, record_date):
-        """计算指定日期的小区级租售联动指标"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO community_metrics
-                (record_date, community_id, community, region, biz_circle,
-                 sale_count, avg_sale_price, avg_sale_unit_price,
-                 rental_count, avg_rent_price, avg_rent_unit_price,
-                 price_rent_ratio, rental_yield)
-                SELECT
-                    %s AS record_date,
-                    COALESCE(s.community_id, r.community_id) AS community_id,
-                    COALESCE(s.community, r.community) AS community,
-                    COALESCE(s.region, r.region) AS region,
-                    COALESCE(s.biz_circle, r.biz_circle) AS biz_circle,
-                    s.sale_count,
-                    s.avg_sale_price,
-                    s.avg_sale_unit_price,
-                    r.rental_count,
-                    r.avg_rent_price,
-                    r.avg_rent_unit_price,
-                    CASE WHEN r.avg_rent_price > 0
-                         THEN ROUND((s.avg_sale_price * 10000) / (r.avg_rent_price * 12))
-                    END AS price_rent_ratio,
-                    CASE WHEN s.avg_sale_price > 0
-                         THEN ROUND((r.avg_rent_price * 12) / (s.avg_sale_price * 10000) * 100)
-                    END AS rental_yield
-                FROM (
-                    SELECT community_id, community, region, biz_circle,
-                           COUNT(*) AS sale_count,
-                           ROUND(AVG(price)) AS avg_sale_price,
-                           ROUND(AVG(unit_price)) AS avg_sale_unit_price
-                    FROM property_details
-                    WHERE status = 1 AND community_id IS NOT NULL
-                    GROUP BY community_id, community, region, biz_circle
-                ) s
-                FULL OUTER JOIN (
-                    SELECT community_id, community, region, biz_circle,
-                           COUNT(*) AS rental_count,
-                           ROUND(AVG(rent_price)) AS avg_rent_price,
-                           ROUND(AVG(rent_price / NULLIF(area, 0))) AS avg_rent_unit_price
-                    FROM rental_details
-                    WHERE status = 1 AND community_id IS NOT NULL
-                    GROUP BY community_id, community, region, biz_circle
-                ) r ON s.community_id = r.community_id
-                ON CONFLICT (community_id) DO UPDATE
-                SET community = EXCLUDED.community,
-                    region = EXCLUDED.region,
-                    biz_circle = EXCLUDED.biz_circle,
-                    sale_count = EXCLUDED.sale_count,
-                    avg_sale_price = EXCLUDED.avg_sale_price,
-                    avg_sale_unit_price = EXCLUDED.avg_sale_unit_price,
-                    rental_count = EXCLUDED.rental_count,
-                    avg_rent_price = EXCLUDED.avg_rent_price,
-                    avg_rent_unit_price = EXCLUDED.avg_rent_unit_price,
-                    price_rent_ratio = EXCLUDED.price_rent_ratio,
-                    rental_yield = EXCLUDED.rental_yield
-            ''', (record_date,))
-            conn.commit()
-            logger.info(f"社区租售联动指标计算完成: {record_date}")
-        except Exception as e:
-            logger.error(f"计算社区租售联动指标失败: {e}")
-            conn.rollback()
-        finally:
-            cursor.close()
-            self._return_connection(conn)

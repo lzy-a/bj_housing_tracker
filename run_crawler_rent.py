@@ -305,13 +305,6 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             except Exception as e:
                 logger.error(f"❌ [租房] 标记 {region} 消失房源失败: {e}")
 
-        # 计算社区租售联动指标
-        try:
-            db_manager.compute_community_metrics(today)
-            logger.info(f"✅ [租售联动] 社区指标计算完成")
-        except Exception as e:
-            logger.error(f"❌ [租售联动] 计算失败: {e}")
-
     logger.info(f"🏁 [租房] 数据库写入完成，共 {processed_count} 条")
 
 
