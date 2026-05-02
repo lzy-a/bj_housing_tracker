@@ -214,7 +214,7 @@ class DatabaseManager:
                 price_rent_ratio FLOAT,
                 rental_yield FLOAT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(record_date, community_id)
+                UNIQUE(community_id)
             )
         ''')
 
@@ -860,7 +860,7 @@ class DatabaseManager:
                     WHERE status = 1 AND community_id IS NOT NULL
                     GROUP BY community_id, community, region, biz_circle
                 ) r ON s.community_id = r.community_id
-                ON CONFLICT (record_date, community_id) DO UPDATE
+                ON CONFLICT (community_id) DO UPDATE
                 SET community = EXCLUDED.community,
                     region = EXCLUDED.region,
                     biz_circle = EXCLUDED.biz_circle,
