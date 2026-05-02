@@ -1,0 +1,46 @@
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 本地数据
+data/
+pgdata/
+metabase-data/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 数据文件
+*.csv
+*.xlsx
+*.xls
+
+# 密钥
+.env
+*.pem
+*.key
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+
+# Docker
+.docker/
+
+# 日志
+*.log

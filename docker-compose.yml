@@ -1,0 +1,41 @@
+version: '3.9'
+
+services:
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: mb_postgres
+    environment:
+      POSTGRES_DB: house_data
+      POSTGRES_USER: mb_admin
+      POSTGRES_PASSWORD: zy2206124
+    volumes:
+      - ./data/pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - house-network
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase_app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./metabase-data:/metabase-data
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: house_data
+      MB_DB_PORT: 5432
+      MB_DB_USER: mb_admin
+      MB_DB_PASS: zy2206124
+      MB_DB_HOST: postgres-db
+    depends_on:
+      - postgres-db
+    networks:
+      - house-network
+    restart: unless-stopped
+
+networks:
+  house-network:
+    driver: bridge

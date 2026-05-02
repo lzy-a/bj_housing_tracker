@@ -1,7 +1,10 @@
-# Web爬虫
+# Web 爬虫
 requests
 beautifulsoup4
 selenium
+webdriver-manager
+playwright
+lxml
 
 # 数据处理
 pandas
@@ -9,6 +12,10 @@ numpy
 
 # 数据库
 sqlalchemy
+psycopg2-binary
+
+# 地理空间
+shapely
 
 # 可视化
 streamlit
@@ -18,7 +25,7 @@ plotly
 schedule
 APScheduler
 
-# 日志和配置
+# 环境配置
 python-dotenv
 
 # 工具

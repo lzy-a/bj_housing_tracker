@@ -1,118 +1,616 @@
-import sqlite3
+import psycopg2
 import pandas as pd
 from pathlib import Path
 import logging
 from datetime import datetime
+import time
+from psycopg2 import extras
+from psycopg2 import pool
+import sys
+
+# 确保项目根目录在 path 中
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from config.settings import DB_CONFIG as DEFAULT_DB_CONFIG
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """数据库管理类"""
-    
-    def __init__(self, db_path: str = 'data/db/beijing_realestate.db'):
-        self.db_path = db_path
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    def __init__(self, db_config=None):
+        """初始化数据库连接池
+
+        Args:
+            db_config: PostgreSQL 连接配置，如果为 None，则使用 settings.py 中的 DB_CONFIG
+        """
+        if db_config is None:
+            self.db_config = DEFAULT_DB_CONFIG.copy()
+        elif isinstance(db_config, str):
+            # 兼容旧调用（传入 SQLite 路径），提示迁移到 PostgreSQL
+            raise ValueError(
+                f"已不支持 SQLite。请使用 PostgreSQL 连接。"
+                f"确保 Docker 已启动: docker-compose up -d"
+            )
+        else:
+            self.db_config = db_config
+        
+        # 创建连接池
+        self.connection_pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=10,
+            **self.db_config
+        )
         self._init_db()
+    
+    def _get_connection(self):
+        """从连接池获取连接"""
+        return self.connection_pool.getconn()
+    
+    def _return_connection(self, conn):
+        """将连接返回连接池"""
+        if conn:
+            self.connection_pool.putconn(conn)
     
     def _init_db(self):
         """初始化数据库表"""
-        conn = sqlite3.connect(self.db_path)
+        # 从连接池获取连接
+        conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 房源信息表
+        # 1. 每日区域大盘表
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS listings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                price REAL NOT NULL,
-                area REAL NOT NULL,
-                unit_price REAL NOT NULL,
-                district TEXT NOT NULL,
-                source TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS district_snapshots (
+                id SERIAL PRIMARY KEY,
+                record_date DATE NOT NULL,               -- 爬取日期
+                region VARCHAR(50) NOT NULL,             -- 区域 (如: '西城区', '朝阳区', '海淀区')
+                total_listings INTEGER,                  -- 当日该区在售房源总数
+                avg_unit_price FLOAT,                   -- 1. 简单均价 (算术平均)：反映市场整体挂牌水平
+                median_unit_price FLOAT,                -- 2. 中位数单价：最贴近"体感"的真实房价，过滤极端值
+                weighted_avg_price FLOAT,               -- 3. 资产平米价 (总价除以总面积)：反映区域资产价值
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(record_date, region)
             )
         ''')
         
-        # 区级统计表
+        # 2. 房源详情主表
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS district_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                district TEXT NOT NULL,
-                avg_price REAL,
-                median_price REAL,
-                avg_unit_price REAL,
-                median_unit_price REAL,
-                listing_count INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS property_details (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) UNIQUE NOT NULL,   -- 房源唯一ID
+                title TEXT NOT NULL,                    -- 房源标题
+                region VARCHAR(50) NOT NULL,            -- 行政区
+                biz_circle VARCHAR(50),                 -- 商圈
+                community VARCHAR(100),                 -- 小区名
+                layout VARCHAR(20),                     -- 户型 (2室1厅)
+                area FLOAT,                             -- 面积
+                price FLOAT,                            -- 总价 (万)
+                unit_price FLOAT,                       -- 单价
+                orientation VARCHAR(20),                -- 朝向
+                decoration VARCHAR(20),                 -- 装修程度
+                floor_info VARCHAR(50),                 -- 楼层信息
+                building_type VARCHAR(50),              -- 建筑类型 (板楼/塔楼)
+                build_year INTEGER,                     -- 建筑年代
+                address_raw TEXT,                       -- 原始字符串留底
+                
+                -- 【关键时间维度】
+                first_seen_date DATE,                   -- 首次入库日期 (用于计算"新上房源")
+                last_seen_date DATE,                    -- 最后一次被爬虫抓到的日期 (用于判定"下架")
+                last_update_date DATE,                  -- 【业务时间】网页显示的最后更新日期 (用于判定"僵尸房源")
+                
+                status INTEGER DEFAULT 1,               -- 状态 (1:在售, 0:下架/消失)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
+        # 3. 价格历史轨迹表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS price_history (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) NOT NULL,          -- 房源唯一ID
+                price FLOAT NOT NULL,                   -- 变动后的总价 (万)
+                unit_price FLOAT NOT NULL,              -- 变动后的单价
+                record_date DATE NOT NULL,              -- 抓取到变动的日期 (爬取时间)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (house_id) REFERENCES property_details(house_id)
+            )
+        ''')
+        
+        # 4. 社区信息表（包含经纬度和乡镇）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS community_info (
+                id SERIAL PRIMARY KEY,
+                community VARCHAR(100) UNIQUE NOT NULL, -- 小区名
+                region VARCHAR(50) NOT NULL,            -- 区域
+                town_id VARCHAR(20),                    -- 乡镇ID
+                town_name VARCHAR(50),                  -- 乡镇名称
+                longitude FLOAT,                        -- 经度
+                latitude FLOAT                         -- 纬度
+            )
+        ''')
+        
+        # 创建索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_property_details_house_id ON property_details(house_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_property_details_region ON property_details(region)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_price_history_house_id ON price_history(house_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_price_history_record_date ON price_history(record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_snapshots_record_date ON district_snapshots(record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_snapshots_region ON district_snapshots(region)')
+
+        # 为社区信息表创建索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_info_community ON community_info(community)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_info_region ON community_info(region)')
+
+        # 加速看板查询的复合索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_house_date ON price_history (house_id, record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pd_comm_region_date ON property_details (community, region, first_seen_date, last_seen_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_date ON price_history (record_date)')
+        
+
+
         conn.commit()
-        conn.close()
-        logger.info(f"数据库初始化完成: {self.db_path}")
+        cursor.close()
+        self._return_connection(conn)
+        logger.info("数据库初始化完成: PostgreSQL")
     
-    def insert_listings(self, df: pd.DataFrame):
-        """插入房源数据"""
-        if df.empty:
-            logger.warning("数据为空，无���插入")
-            return
+
+
+    def insert_property_details(self, house_id: str, title: str, region: str, biz_circle: str, community: str, 
+                            layout: str, area: float, price: float, unit_price: float, 
+                            orientation: str, decoration: str, floor_info: str, 
+                            building_type: str, build_year: int, address_raw: str, last_update_date: str):
+        """插入或更新房源详情，带重试机制"""
+        max_retries = 3
+        retry_count = 0
         
-        conn = sqlite3.connect(self.db_path)
-        try:
-            df.to_sql('listings', conn, if_exists='append', index=False)
-            logger.info(f"成功插入 {len(df)} 条房源数据")
-        except Exception as e:
-            logger.error(f"插入数据失败: {e}")
-        finally:
-            conn.close()
+        while retry_count < max_retries:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                today = datetime.now().date()
+                action = None
+                
+                # 检查房源是否已存在
+                cursor.execute('SELECT first_seen_date, price, unit_price FROM property_details WHERE house_id = %s', (house_id,))
+                result = cursor.fetchone()
+                
+                if result:
+                    # 已存在，更新信息
+                    first_seen_date = result[0]
+                    old_price = result[1]
+                    old_unit_price = result[2]
+                    
+                    cursor.execute('''
+                        UPDATE property_details 
+                        SET title = %s, region = %s, biz_circle = %s, community = %s, layout = %s, area = %s, 
+                            price = %s, unit_price = %s, orientation = %s, decoration = %s, floor_info = %s, 
+                            building_type = %s, build_year = %s, address_raw = %s, last_seen_date = %s, 
+                            last_update_date = %s, status = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE house_id = %s
+                    ''', (title, region, biz_circle, community, layout, area, price, unit_price, 
+                        orientation, decoration, floor_info, building_type, build_year, address_raw, 
+                        today, last_update_date, house_id))
+                    action = "更新"
+                    logger.debug(f"更新房源信息: {house_id}")
+                else:
+                    # 不存在，插入新记录
+                    first_seen_date = today
+                    old_price = None
+                    old_unit_price = None
+                    
+                    cursor.execute('''
+                        INSERT INTO property_details 
+                        (house_id, title, region, biz_circle, community, layout, area, price, unit_price, 
+                        orientation, decoration, floor_info, building_type, build_year, address_raw, 
+                        first_seen_date, last_seen_date, last_update_date, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                    ''', (house_id, title, region, biz_circle, community, layout, area, price, unit_price, 
+                        orientation, decoration, floor_info, building_type, build_year, address_raw, 
+                        today, today, last_update_date))
+                    action = "插入"
+                    logger.debug(f"插入新房源: {house_id}")
+                
+                conn.commit()
+                cursor.close()
+                self._return_connection(conn)
+                return action
+            except psycopg2.OperationalError as e:
+                if "connection is closed" in str(e) or "could not connect" in str(e) and retry_count < max_retries - 1:
+                    logger.warning(f"数据库连接失败，第 {retry_count + 1} 次重试...")
+                    retry_count += 1
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error(f"插入/更新房源详情失败: {e}")
+                    break
+            except Exception as e:
+                logger.error(f"插入/更新房源详情失败: {e}")
+                break
+            finally:
+                if 'cursor' in locals():
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if 'conn' in locals():
+                    try:
+                        self._return_connection(conn)
+                    except:
+                        pass
+        return None
     
-    def insert_district_stats(self, df: pd.DataFrame):
-        """插入区级统计数据"""
-        if df.empty:
-            logger.warning("统计数据为空")
-            return
+    def insert_price_history(self, house_id: str, price: float, unit_price: float, record_date: str):
+        """插入价格历史记录，带重试机制"""
+        max_retries = 3
+        retry_count = 0
         
-        conn = sqlite3.connect(self.db_path)
-        df['timestamp'] = datetime.now()
-        try:
-            df.to_sql('district_stats', conn, if_exists='append', index=False)
-            logger.info(f"成功插入区级统计数据")
-        except Exception as e:
-            logger.error(f"插入统计数据失败: {e}")
-        finally:
-            conn.close()
+        while retry_count < max_retries:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    INSERT INTO price_history (house_id, price, unit_price, record_date)
+                    VALUES (%s, %s, %s, %s)
+                ''', (house_id, price, unit_price, record_date))
+                conn.commit()
+                cursor.close()
+                self._return_connection(conn)
+                logger.debug(f"成功插入价格历史记录: {house_id} - {record_date}")
+                return True
+            except psycopg2.OperationalError as e:
+                if "connection is closed" in str(e) or "could not connect" in str(e) and retry_count < max_retries - 1:
+                    logger.warning(f"数据库连接失败，第 {retry_count + 1} 次重试...")
+                    retry_count += 1
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error(f"插入价格历史记录失败: {e}")
+                    break
+            except Exception as e:
+                logger.error(f"插入价格历史记录失败: {e}")
+                break
+            finally:
+                if 'conn' in locals():
+                    try:
+                        conn.close()
+                    except:
+                        pass
+        return False
     
-    def get_district_stats(self) -> pd.DataFrame:
-        """获取最新区级统计数据"""
-        conn = sqlite3.connect(self.db_path)
+    def insert_district_snapshot(self, record_date: str, region: str, total_listings: int, avg_unit_price: float, median_unit_price: float, weighted_avg_price: float):
+        """插入区域快照数据"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
         try:
-            query = '''
-                SELECT * FROM district_stats 
-                WHERE timestamp = (SELECT MAX(timestamp) FROM district_stats)
-                ORDER BY avg_price DESC
-            '''
-            df = pd.read_sql_query(query, conn)
-            return df
+            cursor.execute('''
+                INSERT INTO district_snapshots (record_date, region, total_listings, avg_unit_price, median_unit_price, weighted_avg_price)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (record_date, region) DO UPDATE
+                SET total_listings = EXCLUDED.total_listings,
+                    avg_unit_price = EXCLUDED.avg_unit_price,
+                    median_unit_price = EXCLUDED.median_unit_price,
+                    weighted_avg_price = EXCLUDED.weighted_avg_price
+            ''', (record_date, region, total_listings, avg_unit_price, median_unit_price, weighted_avg_price))
+            conn.commit()
+            logger.info(f"成功插入区域快照数据: {record_date} - {region}")
         except Exception as e:
-            logger.error(f"查询统计数据失败: {e}")
+            logger.error(f"插入区域快照数据失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def mark_disappeared_properties(self, region: str):
+        """标记消失的房源为下架状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 将状态为2（待确认）的房源标记为0（下架）
+            cursor.execute('''
+                UPDATE property_details 
+                SET status = 0 
+                WHERE region = %s AND status = 2
+            ''', (region,))
+            affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"成功标记 {affected} 个消失的房源为下架状态")
+        except Exception as e:
+            logger.error(f"标记消失房源失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def get_district_snapshots(self, region: str = None) -> pd.DataFrame:
+        """获取区域快照数据"""
+        conn = self._get_connection()
+        try:
+            query = 'SELECT * FROM district_snapshots'
+            params = []
+            if region:
+                query += ' WHERE region = %s'
+                params.append(region)
+            query += ' ORDER BY record_date DESC'
+            return pd.read_sql_query(query, conn, params=params)
+        except Exception as e:
+            logger.error(f"查询区域快照数据失败: {e}")
             return pd.DataFrame()
         finally:
-            conn.close()
+            self._return_connection(conn)
     
-    def get_latest_listings(self, limit: int = 100) -> pd.DataFrame:
-        """获取最新房源数据"""
-        conn = sqlite3.connect(self.db_path)
+    def get_property_details(self, region: str = None, status: int = None) -> pd.DataFrame:
+        """获取房源详情数据"""
+        conn = self._get_connection()
         try:
-            query = f'''
-                SELECT * FROM listings 
-                ORDER BY timestamp DESC 
-                LIMIT {limit}
-            '''
-            df = pd.read_sql_query(query, conn)
-            return df
+            query = 'SELECT * FROM property_details WHERE 1=1'
+            params = []
+            if region:
+                query += ' AND region = %s'
+                params.append(region)
+            if status is not None:
+                query += ' AND status = %s'
+                params.append(status)
+            return pd.read_sql_query(query, conn, params=params)
         except Exception as e:
-            logger.error(f"查询房源数据失败: {e}")
+            logger.error(f"查询房源详情数据失败: {e}")
             return pd.DataFrame()
         finally:
-            conn.close()
+            self._return_connection(conn)
+    
+    def get_price_history(self, house_id: str = None) -> pd.DataFrame:
+        """获取价格历史数据"""
+        conn = self._get_connection()
+        try:
+            if house_id:
+                query = 'SELECT * FROM price_history WHERE house_id = %s ORDER BY record_date DESC'
+                return pd.read_sql_query(query, conn, params=(house_id,))
+            else:
+                return pd.read_sql_query('SELECT * FROM price_history ORDER BY record_date DESC', conn)
+        except Exception as e:
+            logger.error(f"查询价格历史数据失败: {e}")
+            return pd.DataFrame()
+        finally:
+            self._return_connection(conn)
+    
+    def get_property(self, house_id: str) -> dict:
+        """获取房源详情"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.DictCursor)
+        try:
+            cursor.execute('SELECT * FROM property_details WHERE house_id = %s', (house_id,))
+            result = cursor.fetchone()
+            if result:
+                return dict(result)
+            return None
+        except Exception as e:
+            logger.error(f"获取房源详情失败: {e}")
+            return None
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def get_latest_price(self, house_id: str) -> float:
+        """获取房源最新价格"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 先从price_history表获取最新价格
+            cursor.execute('''
+                SELECT price FROM price_history 
+                WHERE house_id = %s 
+                ORDER BY record_date DESC 
+                LIMIT 1
+            ''', (house_id,))
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            
+            # 如果price_history表中没有记录，从property_details表获取
+            cursor.execute('SELECT price FROM property_details WHERE house_id = %s', (house_id,))
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            
+            return 0
+        except Exception as e:
+            logger.error(f"获取最新价格失败: {e}")
+            return 0
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def update_property_status(self, house_id: str = None, region: str = None, status: int = None, last_seen_date: str = None, last_update_date: str = None):
+        """更新房源状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            if house_id:
+                # 更新单个房源
+                update_fields = []
+                params = []
+                
+                if status is not None:
+                    update_fields.append('status = %s')
+                    params.append(status)
+                if last_seen_date:
+                    update_fields.append('last_seen_date = %s')
+                    params.append(last_seen_date)
+                if last_update_date:
+                    update_fields.append('last_update_date = %s')
+                    params.append(last_update_date)
+                
+                if update_fields:
+                    update_fields.append('updated_at = CURRENT_TIMESTAMP')
+                    query = f"UPDATE property_details SET {', '.join(update_fields)} WHERE house_id = %s"
+                    params.append(house_id)
+                    cursor.execute(query, params)
+                    conn.commit()
+                    logger.debug(f"成功更新房源状态: {house_id}")
+            elif region:
+                # 更新整个区域的房源状态
+                if status is not None:
+                    cursor.execute('UPDATE property_details SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE region = %s', (status, region))
+                    conn.commit()
+                    logger.info(f"成功更新 {region} 区域的房源状态为 {status}")
+        except Exception as e:
+            logger.error(f"更新房源状态失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def batch_insert_property_details(self, properties):
+        """批量插入房源详情
+        
+        Args:
+            properties: 房源列表，每个元素是包含房源信息的字典
+        """
+        if not properties:
+            return
+        
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 使用 execute_values 进行批量插入
+            from psycopg2.extras import execute_values
+            
+            today = datetime.now().date()
+            values = []
+            
+            for prop in properties:
+                # 检查房源是否已存在
+                cursor.execute('SELECT first_seen_date FROM property_details WHERE house_id = %s', (prop['house_id'],))
+                result = cursor.fetchone()
+                
+                if result:
+                    # 已存在，更新
+                    cursor.execute('''
+                        UPDATE property_details 
+                        SET title = %s, region = %s, biz_circle = %s, community = %s, layout = %s, area = %s, 
+                            price = %s, unit_price = %s, orientation = %s, decoration = %s, floor_info = %s, 
+                            building_type = %s, build_year = %s, address_raw = %s, last_seen_date = %s, 
+                            last_update_date = %s, status = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE house_id = %s
+                    ''', (prop['title'], prop['region'], prop['biz_circle'], prop['community'], prop['layout'], 
+                          prop['area'], prop['price'], prop['unit_price'], prop['orientation'], prop['decoration'], 
+                          prop['floor_info'], prop['building_type'], prop['build_year'], prop['address_raw'], 
+                          today, prop['last_update_date'], prop['house_id']))
+                else:
+                    # 不存在，插入
+                    values.append((
+                        prop['house_id'], prop['title'], prop['region'], prop['biz_circle'], prop['community'], 
+                        prop['layout'], prop['area'], prop['price'], prop['unit_price'], prop['orientation'], 
+                        prop['decoration'], prop['floor_info'], prop['building_type'], prop['build_year'], 
+                        prop['address_raw'], today, today, prop['last_update_date'], 1
+                    ))
+            
+            # 批量插入新记录
+            if values:
+                execute_values(
+                    cursor,
+                    '''
+                    INSERT INTO property_details 
+                    (house_id, title, region, biz_circle, community, layout, area, price, unit_price, 
+                    orientation, decoration, floor_info, building_type, build_year, address_raw, 
+                    first_seen_date, last_seen_date, last_update_date, status)
+                    VALUES %s
+                    ON CONFLICT (house_id) DO NOTHING
+                    ''',
+                    values
+                )
+            
+            conn.commit()
+            logger.info(f"批量插入/更新 {len(properties)} 条房源详情")
+        except Exception as e:
+            logger.error(f"批量插入房源详情失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def batch_insert_price_history(self, prices):
+        """批量插入价格历史
+        
+        Args:
+            prices: 价格历史列表，每个元素是包含价格信息的字典
+        """
+        if not prices:
+            return
+        
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 使用 execute_values 进行批量插入
+            from psycopg2.extras import execute_values
+            
+            values = [(p['house_id'], p['price'], p['unit_price'], p['record_date']) for p in prices]
+            
+            execute_values(
+                cursor,
+                '''
+                INSERT INTO price_history (house_id, price, unit_price, record_date)
+                VALUES %s
+                ''',
+                values
+            )
+            
+            conn.commit()
+            logger.info(f"批量插入 {len(prices)} 条价格历史记录")
+        except Exception as e:
+            logger.error(f"批量插入价格历史失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def batch_insert_community_info(self, communities):
+        """批量插入社区信息
+        
+        Args:
+            communities: 社区信息列表，每个元素是包含社区信息的字典
+        """
+        if not communities:
+            return
+        
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 使用 execute_values 进行批量插入
+            from psycopg2.extras import execute_values
+            
+            values = [(c['community'], c['region'], c.get('town_id'), c.get('town_name'), c.get('经度'), c.get('纬度')) for c in communities]
+            
+            execute_values(
+                cursor,
+                '''
+                INSERT INTO community_info (community, region, town_id, town_name, longitude, latitude)
+                VALUES %s
+                ON CONFLICT (community) DO UPDATE
+                SET region = EXCLUDED.region,
+                    town_id = EXCLUDED.town_id,
+                    town_name = EXCLUDED.town_name,
+                    longitude = EXCLUDED.longitude,
+                    latitude = EXCLUDED.latitude
+                ''',
+                values
+            )
+            
+            conn.commit()
+            logger.info(f"批量插入/更新 {len(communities)} 条社区信息")
+        except Exception as e:
+            logger.error(f"批量插入社区信息失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+    
+    def execute_query(self, query, params=None):
+        """执行自定义SQL查询"""
+        conn = self._get_connection()
+        try:
+            return pd.read_sql_query(query, conn, params=params)
+        except Exception as e:
+            logger.error(f"执行SQL查询失败: {e}")
+            return pd.DataFrame()
+        finally:
+            self._return_connection(conn)
