@@ -837,10 +837,10 @@ class DatabaseManager:
                     r.avg_rent_price,
                     r.avg_rent_unit_price,
                     CASE WHEN r.avg_rent_price > 0
-                         THEN ROUND((s.avg_sale_price * 10000) / (r.avg_rent_price * 12)::numeric, 0)
+                         THEN ROUND(((s.avg_sale_price * 10000) / (r.avg_rent_price * 12))::numeric, 0)
                     END AS price_rent_ratio,
                     CASE WHEN s.avg_sale_price > 0
-                         THEN ROUND((r.avg_rent_price * 12) / (s.avg_sale_price * 10000) * 100, 2)
+                         THEN ROUND(((r.avg_rent_price * 12) / (s.avg_sale_price * 10000) * 100)::numeric, 2)
                     END AS rental_yield
                 FROM (
                     SELECT community_id, community, region, biz_circle,
