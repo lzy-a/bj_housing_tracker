@@ -363,6 +363,7 @@ def global_db_consumer(queue, stop_event, db_config, regions):
                 'region': region,
                 'biz_circle': listing.get('biz_circle', ''),
                 'community': listing.get('community', ''),
+                'community_id': listing.get('community_id'),
                 'layout': listing.get('layout', ''),
                 'area': listing.get('area', 0),
                 'price': web_price,
