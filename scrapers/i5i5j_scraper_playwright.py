@@ -207,18 +207,21 @@ class I5I5JScraperPlaywright:
 
     @staticmethod
     def _parse_position(list_x):
-        """从 listX div 提取商圈和小区，返回 (biz_circle, community)"""
-        biz_circle, community = '未知', '未知'
+        """从 listX div 提取商圈和小区，返回 (biz_circle, community, community_id)"""
+        biz_circle, community, community_id = '未知', '未知', None
         i02 = list_x.find('i', {'class': 'i_02'})
         if not i02:
-            return biz_circle, community
+            return biz_circle, community, community_id
         second_p = i02.find_parent('p')
         if not second_p:
-            return biz_circle, community
+            return biz_circle, community, community_id
 
         community_link = second_p.find('a')
         if community_link:
             community = community_link.get_text(strip=True)
+            m_cid = re.search(r'/xiaoqu/(\d+)\.html', community_link.get('href', ''))
+            if m_cid:
+                community_id = m_cid.group(1)
 
         i02_next = i02.next_sibling
         if i02_next:
@@ -236,7 +239,7 @@ class I5I5JScraperPlaywright:
                 parts = position_text.split('·')
                 if len(parts) > 1:
                     biz_circle = parts[0].strip()
-        return biz_circle, community
+        return biz_circle, community, community_id
 
     @staticmethod
     def _parse_update_time(list_x):
@@ -314,7 +317,7 @@ class I5I5JScraperPlaywright:
                     if info is None:
                         continue  # 车位
 
-                    biz_circle, community = cls._parse_position(list_x)
+                    biz_circle, community, community_id = cls._parse_position(list_x)
                     update_time = cls._parse_update_time(list_x)
 
                     jia_div = list_x.find('div', {'class': 'jia'})
@@ -331,6 +334,7 @@ class I5I5JScraperPlaywright:
                             'region': '',
                             'biz_circle': biz_circle,
                             'community': community,
+                            'community_id': community_id,
                             'layout': info['layout'],
                             'area': info['area'],
                             'price': price,

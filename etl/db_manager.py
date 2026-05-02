@@ -83,6 +83,7 @@ class DatabaseManager:
                 region VARCHAR(50) NOT NULL,            -- 行政区
                 biz_circle VARCHAR(50),                 -- 商圈
                 community VARCHAR(100),                 -- 小区名
+                community_id VARCHAR(20),               -- 5i5j 小区物理ID（租售关联桥梁）
                 layout VARCHAR(20),                     -- 户型 (2室1厅)
                 area FLOAT,                             -- 面积
                 price FLOAT,                            -- 总价 (万)
@@ -142,6 +143,92 @@ class DatabaseManager:
         # 为社区信息表创建索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_info_community ON community_info(community)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_info_region ON community_info(region)')
+
+        # 5. 租房房源主表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rental_details (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) UNIQUE NOT NULL,
+                community_id VARCHAR(20),
+                title TEXT NOT NULL,
+                region VARCHAR(50) NOT NULL,
+                biz_circle VARCHAR(50),
+                community VARCHAR(100),
+                layout VARCHAR(20),
+                area FLOAT,
+                rent_price FLOAT,
+                rent_type VARCHAR(10),
+                orientation VARCHAR(20),
+                decoration VARCHAR(20),
+                floor_info VARCHAR(50),
+                first_seen_date DATE,
+                last_seen_date DATE,
+                status INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 6. 租金变动记录
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rent_history (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) NOT NULL,
+                rent_price FLOAT NOT NULL,
+                record_date DATE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (house_id) REFERENCES rental_details(house_id)
+            )
+        ''')
+
+        # 7. 每日区域租赁大盘
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS district_rent_snapshots (
+                id SERIAL PRIMARY KEY,
+                record_date DATE NOT NULL,
+                region VARCHAR(50) NOT NULL,
+                total_rentals INTEGER,
+                avg_rent_price FLOAT,
+                median_rent_price FLOAT,
+                avg_unit_rent FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(record_date, region)
+            )
+        ''')
+
+        # 8. 小区级租售联动表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS community_metrics (
+                id SERIAL PRIMARY KEY,
+                record_date DATE NOT NULL,
+                community_id VARCHAR(20),
+                community VARCHAR(100) NOT NULL,
+                region VARCHAR(50) NOT NULL,
+                biz_circle VARCHAR(50),
+                sale_count INTEGER,
+                avg_sale_price FLOAT,
+                avg_sale_unit_price FLOAT,
+                rental_count INTEGER,
+                avg_rent_price FLOAT,
+                avg_rent_unit_price FLOAT,
+                price_rent_ratio FLOAT,
+                rental_yield FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(record_date, community_id)
+            )
+        ''')
+
+        # 租赁相关索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_details_house_id ON rental_details(house_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_details_region ON rental_details(region)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_details_community_id ON rental_details(community_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rent_history_house_id ON rent_history(house_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rent_history_record_date ON rent_history(record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_rent_snapshots_date ON district_rent_snapshots(record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_district_rent_snapshots_region ON district_rent_snapshots(region)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_metrics_date ON community_metrics(record_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_metrics_community_id ON community_metrics(community_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_property_details_community_id ON property_details(community_id)')
 
         # 加速看板查询的复合索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_house_date ON price_history (house_id, record_date)')
@@ -485,22 +572,25 @@ class DatabaseManager:
                 if result:
                     # 已存在，更新
                     cursor.execute('''
-                        UPDATE property_details 
-                        SET title = %s, region = %s, biz_circle = %s, community = %s, layout = %s, area = %s, 
-                            price = %s, unit_price = %s, orientation = %s, decoration = %s, floor_info = %s, 
-                            building_type = %s, build_year = %s, address_raw = %s, last_seen_date = %s, 
-                            last_update_date = %s, status = 1, updated_at = CURRENT_TIMESTAMP
+                        UPDATE property_details
+                        SET title = %s, region = %s, biz_circle = %s, community = %s, community_id = %s,
+                            layout = %s, area = %s, price = %s, unit_price = %s, orientation = %s,
+                            decoration = %s, floor_info = %s, building_type = %s, build_year = %s,
+                            address_raw = %s, last_seen_date = %s, last_update_date = %s,
+                            status = 1, updated_at = CURRENT_TIMESTAMP
                         WHERE house_id = %s
-                    ''', (prop['title'], prop['region'], prop['biz_circle'], prop['community'], prop['layout'], 
-                          prop['area'], prop['price'], prop['unit_price'], prop['orientation'], prop['decoration'], 
-                          prop['floor_info'], prop['building_type'], prop['build_year'], prop['address_raw'], 
+                    ''', (prop['title'], prop['region'], prop['biz_circle'], prop['community'],
+                          prop.get('community_id'), prop['layout'],
+                          prop['area'], prop['price'], prop['unit_price'], prop['orientation'], prop['decoration'],
+                          prop['floor_info'], prop['building_type'], prop['build_year'], prop['address_raw'],
                           today, prop['last_update_date'], prop['house_id']))
                 else:
                     # 不存在，插入
                     values.append((
-                        prop['house_id'], prop['title'], prop['region'], prop['biz_circle'], prop['community'], 
-                        prop['layout'], prop['area'], prop['price'], prop['unit_price'], prop['orientation'], 
-                        prop['decoration'], prop['floor_info'], prop['building_type'], prop['build_year'], 
+                        prop['house_id'], prop['title'], prop['region'], prop['biz_circle'], prop['community'],
+                        prop.get('community_id'),
+                        prop['layout'], prop['area'], prop['price'], prop['unit_price'], prop['orientation'],
+                        prop['decoration'], prop['floor_info'], prop['building_type'], prop['build_year'],
                         prop['address_raw'], today, today, prop['last_update_date'], 1
                     ))
             
@@ -509,9 +599,10 @@ class DatabaseManager:
                 execute_values(
                     cursor,
                     '''
-                    INSERT INTO property_details 
-                    (house_id, title, region, biz_circle, community, layout, area, price, unit_price, 
-                    orientation, decoration, floor_info, building_type, build_year, address_raw, 
+                    INSERT INTO property_details
+                    (house_id, title, region, biz_circle, community, community_id,
+                    layout, area, price, unit_price, orientation, decoration, floor_info,
+                    building_type, build_year, address_raw,
                     first_seen_date, last_seen_date, last_update_date, status)
                     VALUES %s
                     ON CONFLICT (house_id) DO NOTHING
