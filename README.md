@@ -8,9 +8,9 @@
 # 1. 启动 Docker（PostgreSQL + Metabase）
 docker-compose up -d
 
-# 2. 一键全量爬取（自动拉起 Chrome，先二手房后租房）
+# 2. 一键全量爬取
 source venv/bin/activate
-python run_all.py                    # 全部 6 区
+python run_all.py                    # 全部 6 区（自动拉起 Chrome → 二手房 → 租房 → 关 Chrome）
 python run_all.py -r 0 1 2           # 指定区域
 python run_all.py --sale-only        # 只爬二手房
 python run_all.py --rent-only        # 只爬租房
@@ -19,21 +19,29 @@ python run_all.py --rent-only        # 只爬租房
 # http://localhost:3000
 ```
 
+`run_all.py` 会自动检测 Chrome CDP 是否在跑：没有就拉起（`--remote-debugging-port=9223 --blink-settings=imagesEnabled=false`），全部爬完后杀掉 Chrome 释放资源，下次启动是全新浏览器。
+
 ## 架构
 
 ```
-run_all.py                              → 一键调度：自动检测/拉起 Chrome → 二手房 → 租房
-run_crawler_playwright.py               → 二手房爬虫（CDP 多标签异步）
-run_crawler_rent.py                     → 租房爬虫（同上架构）
-scrapers/i5i5j_scraper_playwright.py    → 二手房页面解析
+run_all.py                              → 一键调度：ensure_chrome → 二手房 → 租房 → shutdown_chrome
+run_crawler_playwright.py               → 二手房爬虫（CDP 多标签异步 + Queue → DB consumer）
+run_crawler_rent.py                     → 租房爬虫（同上）
+scrapers/i5i5j_scraper_playwright.py    → 二手房页面解析（BeautifulSoup）
 scrapers/i5i5j_rent_scraper_playwright.py → 租房页面解析
-etl/db_manager.py                       → 全部 DB 操作（建表 / 批量写入 / 快照 / 社区指标）
-config/settings.py                      → 配置（读取 .env）
+etl/db_manager.py                       → 全部 DB 操作（建表 / 批量写入 / 快照）
+config/settings.py                      → 所有配置，读取 .env
 ```
 
-**数据流**：Chrome CDP → Playwright 多 tab 并发抓取 → BeautifulSoup 解析 → Queue → DB consumer 批量写入
+**数据流**：Chrome CDP → Playwright `connect_over_cdp()` → 多 tab 异步 `page.goto()` → BeautifulSoup `extract_information()` → `multiprocessing.Queue` → `global_db_consumer` 批量写入 PostgreSQL。
 
-**状态生命周期**：爬取前整区置为 status=2（待确认）→ 爬取中抓到的置为 1 → 爬取后仍为 2 的置为 0（下架/下租）
+**Scraper 生命周期**：
+1. 启动时创建临时 scraper 检查/执行登录 → `close()` 释放
+2. 每个区域创建新 scraper 实例（新 Playwright 驱动 + CDP 连接）
+3. 区域内每 400 页重建 scraper（主要为朝阳 ~700 页设计，防止中途卡住）
+4. 全部区域跑完后 `run_all.py` 杀 Chrome 释放浏览器资源
+
+**状态生命周期**：爬取前整区置为 status=2（待确认）→ 爬取中抓到的置为 1 → 爬取后仍为 2 的置为 0（下架）。
 
 ## 配置
 
@@ -43,7 +51,18 @@ config/settings.py                      → 配置（读取 .env）
 |------|------|------|
 | `DB_HOST/PORT/NAME/USER/PASSWORD` | PostgreSQL | localhost:5432/house_data |
 | `CHROME_DEBUG_PORT` | Chrome 远程调试端口 | 9223 |
-| `I5I5J_PHONE/PASSWORD` | 我爱我家登录 | — |
+| `I5I5J_PHONE/PASSWORD` | 我爱我家登录凭据 | — |
+
+`config/settings.py` 中的 `SCRAPER_CONFIG`：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `window_size` | 5 | 并行 tab 数 |
+| `restart_interval` | 400 | 区域内每 N 页重建 scraper |
+| `batch_size` | 500 | DB 批量写入条数 |
+| `max_page` | 2000 | 单区域最大扫描页 |
+| `delay` | 0.0 | 页间延迟（秒） |
+| `timeout` | 30 | page.goto 超时（秒） |
 
 ## 区域编号
 
@@ -56,62 +75,43 @@ config/settings.py                      → 配置（读取 .env）
 | 4 | 丰台区 | fengtaiqu |
 | 5 | 石景山区 | shijingshanqu |
 
-## 数据库表
+URL 模式：`https://bj.5i5j.com/ershoufang/{pinyin}/n{page}/`（租房为 `/zufang/`）
 
-以下由 `etl/db_manager.py` 的 `_init_db()` 自动创建。
+## 数据库
+
+PostgreSQL `house_data`，7 张表由 `DatabaseManager._init_db()` 自动创建。
 
 ### 二手房
 
-#### property_details — 房源主表
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| house_id | VARCHAR(20) UNIQUE | 房源 ID |
-| community / community_id | VARCHAR | 小区名 / 5i5j 小区物理 ID（租售关联桥梁） |
-| region / biz_circle | VARCHAR(50) | 行政区 / 商圈 |
-| layout / area | VARCHAR(20) / FLOAT | 户型 / 面积 |
-| price / unit_price | FLOAT | 总价(万) / 单价(元/㎡) |
-| orientation / decoration / floor_info | VARCHAR | 朝向 / 装修 / 楼层 |
-| build_year | INTEGER | 建筑年代 |
-| first_seen_date / last_seen_date | DATE | 首次入库 / 最后出现日期 |
-| status | INTEGER | 1=在售 0=下架 |
-
-#### price_history — 价格变动（仅在价格变化时写入）
+| 表 | 说明 |
+|------|------|
+| `property_details` | 房源主表，`house_id` UNIQUE，含 community_id（租售关联桥梁），status 管理上下架 |
+| `price_history` | 价格变动日志，**仅价格变化时写入**（consumer 内内存比对，同价跳过） |
+| `district_snapshots` | 每日区域大盘：在售数、均价、中位数价、资产平米价，`UNIQUE(record_date, region)` |
 
 ### 租房
 
-#### rental_details — 租房主表
-
-镜像 `property_details`，差异字段：
-
-| 字段 | 说明 |
+| 表 | 说明 |
 |------|------|
-| rent_price | 月租金（元） |
-| rent_type | 整租 / 合租 |
+| `rental_details` | 租房主表，差异字段：`rent_price`（月租金）、`rent_type`（整租/合租） |
+| `rent_history` | 租金变动日志，逻辑同 price_history |
+| `district_rent_snapshots` | 每日区域租赁大盘：在租数、均租、中位租、单位面积租金 |
 
-#### rent_history — 租金变动
+### 关联
 
-### 大盘 & 联动
-
-#### district_snapshots / district_rent_snapshots — 每日区域均价/租金快照
-
-#### community_metrics — 小区级租售联动（每日预计算）
-
-| 指标 | 说明 |
+| 表 | 说明 |
 |------|------|
-| price_rent_ratio | 售租比 = 总价 / (月租金 × 12)，即回本年限 |
-| rental_yield | 租金回报率 = 年租金 / 总价 × 100% |
+| `community_info` | 小区信息：经纬度、乡镇。通过 `community_id` 关联售/租房源 |
 
-通过 `community_id` 关联同一小区在售和在租房源，避免看板每次 JOIN 两张主表。
+### 关键细节
 
-## Metabase 看板
+- **价格比对**：consumer 启动时先从 `property_details WHERE status=1` 加载全量价格到内存，之后全部内存比对（无 DB 查询）。注意必须在 status 更新为 2 **之前**加载。
+- **批量写入**：`batch_insert_property_details` 使用 `ON CONFLICT (house_id) DO UPDATE`，`district_snapshots` 使用 `ON CONFLICT (record_date, region) DO UPDATE`。
+- **回报率/售租比**：已不在 DB 中预计算，改为 Metabase 卡片内 `community_id` JOIN 实时计算。
 
-`metabase-data/export/` 保存了完整看板配置，包含三 tab：
+## Metabase
 
-| Tab | 内容 |
-|-----|------|
-| 行政区 | 大盘指标、梯队排名、供需变化、涨跌排名（联动行政区筛选器） |
-| 板块 | 商圈级分析（详情/走势/均价/户型/挂牌量，联动板块筛选器） |
-| 小区 | 小区级分析（同上结构，联动小区筛选器） |
-
-筛选器支持 crossfilter 联动点击：板块名 → 板块筛选器、小区名 → 小区筛选器、户型 → 户型筛选器。
+- 地址：http://localhost:3000
+- 看板配置位于 `metabase-data/export/`（只读参考，通过 API 操作）
+- 三 tab：行政区 / 板块 / 小区，支持 crossfilter 联动筛选
+- 详细工作流见 `memory/feedback_metabase_workflow.md`
