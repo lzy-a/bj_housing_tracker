@@ -108,12 +108,13 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
     logger.info("🔐 开始检查登录状态")
     await scraper.check_and_login()
     logger.info("✅ 登录检查完成")
-    
+    await scraper.close()
+
     try:
         for dist_code, dist_name in district_tasks.items():
             current_page = 1
             max_page = 2000
-            restart_interval = 400
+            restart_interval = SCRAPER_CONFIG['restart_interval']
             is_region_finished = False
             total_listings = 0
             region_start_time = time.time()

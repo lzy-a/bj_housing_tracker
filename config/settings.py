@@ -36,6 +36,7 @@ SCRAPER_CONFIG = {
     'timeout': 30,
     'window_size': 5,
     'max_page': 2000,
+    'restart_interval': 400,
     'batch_size': 500,
 }
 

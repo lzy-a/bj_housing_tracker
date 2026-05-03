@@ -50,6 +50,18 @@ def ensure_chrome():
     sys.exit(1)
 
 
+def shutdown_chrome():
+    """关闭 Chrome CDP 实例，释放浏览器资源"""
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"remote-debugging-port={CHROME_PORT}"],
+            timeout=5
+        )
+        print("✅ Chrome 浏览器已关闭，下次启动将为全新实例")
+    except Exception:
+        pass
+
+
 def run_step(name, script, *args):
     """运行一个爬虫步骤"""
     print(f"\n{'=' * 60}")
@@ -86,7 +98,10 @@ def main():
 
     for name, script in scripts:
         if not run_step(name, script, *region_args):
+            shutdown_chrome()
             sys.exit(1)
+
+    shutdown_chrome()
 
     print(f"\n{'=' * 60}")
     print("🎉 全部完成！二手房 + 租房数据已入库，社区指标已更新")

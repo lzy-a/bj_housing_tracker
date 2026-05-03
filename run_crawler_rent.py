@@ -89,12 +89,13 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
     scraper = I5I5JRentScraperPlaywright(debug_port=debug_port)
     await scraper.connect()
     await scraper.check_and_login()
+    await scraper.close()
 
     try:
         for dist_code, dist_name in district_tasks.items():
             current_page = 1
             max_page = 2000
-            restart_interval = 400
+            restart_interval = SCRAPER_CONFIG['restart_interval']
             is_region_finished = False
             total_listings = 0
 
