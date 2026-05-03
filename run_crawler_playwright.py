@@ -236,6 +236,13 @@ def global_db_consumer(queue, stop_event, db_config, regions):
     property_batch = []  # 房源批量数据
     price_batch = []  # 价格历史批量数据
     
+    # 启动时一次性加载全量二手房价格到内存（必须在 status 更新前，否则 WHERE status=1 查不到）
+    logger.info("📥 加载全量二手房价格到内存...")
+    all_prices = db_manager.load_property_prices()
+    logger.info(f"📥 已加载 {len(all_prices)} 条价格记录")
+
+    price_check_map = {}  # {house_id: (web_price, web_unit_price)} 批次内价格比对缓存
+
     # 初始状态更新：将所有区域的房源状态设为待确认
     logger.info("📋 开始更新所有区域的房源状态为待确认")
     for region in regions:
@@ -244,13 +251,6 @@ def global_db_consumer(queue, stop_event, db_config, regions):
             logger.info(f"✅ {region} 区域状态更新完成")
         except Exception as e:
             logger.error(f"❌ 更新 {region} 区域状态失败: {e}")
-    
-    price_check_map = {}  # {house_id: (web_price, web_unit_price)} 批次内价格比对缓存
-
-    # 启动时一次性加载全量二手房价格到内存，之后全部内存比对
-    logger.info("📥 加载全量二手房价格到内存...")
-    all_prices = db_manager.load_property_prices()
-    logger.info(f"📥 已加载 {len(all_prices)} 条价格记录")
 
     def process_batch():
         """处理批量数据，全部内存比对，无 DB 查询"""
@@ -358,7 +358,7 @@ def global_db_consumer(queue, stop_event, db_config, regions):
                 ledger[region]['areas'].append(listing['area'])  # 面积列表
             
             processed_count += 1
-            if processed_count % 100 == 0:
+            if processed_count % 1000 == 0:
                 logger.info(f"📊 已处理 {processed_count} 条房源")
                 
         except Empty:

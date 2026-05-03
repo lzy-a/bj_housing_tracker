@@ -282,7 +282,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
                 ledger[region]['areas'].append(listing['area'])
 
             processed_count += 1
-            if processed_count % 100 == 0:
+            if processed_count % 1000 == 0:
                 logger.info(f"📊 [租房] 已处理 {processed_count} 条")
 
         except Exception as e:
