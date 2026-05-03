@@ -49,85 +49,49 @@ def calc_district_stats(unit_prices, prices, areas):
 
 
 async def process_page(page, region_code, region_name, page_num, shared_queue):
-    """处理单个页面"""
+    """处理单个页面，返回 (success, listing_count, elapsed_ms)"""
     try:
-        # 随机微调，错开并发波峰
-        import random
-        # await asyncio.sleep(random.uniform(0.25, 0.5))
-        
-        url = f"https://bj.5i5j.com/ershoufang/{region_code}/n{page_num}/"
-        logger.info(f"🚀 开始加载 {region_name} 第 {page_num} 页: {url}")
-        
-        # 1. 导航到页面，只等待 DOM 加载完成
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        
-        # 3. 获取页面内容
-        html = await page.content()
-        
-        # 5. 检查是否有房源列表
-        try:
-            # 等待房源列表出现
-            await page.wait_for_selector('ul.pList', timeout=5000)
-            logger.info(f"✅ {region_name} 第 {page_num} 页房源列表已加载")
-        except Exception as e:
-            # 如果等不到，检查是不是真的“无数据”空提示
-            logger.warning(f"⚠️ {region_name} 第 {page_num} 页未找到房源列表: {e}")
-            
-            # 检查是否有反爬提示
-            anti_crawl = await page.query_selector('.anti-crawl')
-            if anti_crawl:
-                logger.warning(f"⚠️ {region_name} 第 {page_num} 页可能被反爬")
-                return True, 0  # 反爬不是真正的无数据，继续尝试
-            
-            # 检查是否有登录提示
-            login_prompt = await page.query_selector('.login-prompt')
-            if login_prompt:
-                logger.warning(f"⚠️ {region_name} 第 {page_num} 页需要登录")
-                return True, 0  # 登录不是真正的无数据，继续尝试
-            
-            # 检查是否有其他无数据提示
-            no_data_selectors = ['.n_no_data', '.no-result', '.empty-tip']
-            for selector in no_data_selectors:
-                no_data = await page.query_selector(selector)
-                if no_data:
-                    logger.info(f"🛑 {region_name} 确实没数据了")
-                    return False, 0  # 真正的无数据，返回 False
-            
-            logger.warning(f"⚠️ {region_name} 第 {page_num} 页加载异常")
-            return True, 0  # 加载异常不是真正的无数据，继续尝试
+        t0 = time.perf_counter()
 
-        # 6. 提取数据
-        soup = BeautifulSoup(html, 'lxml')
-        
-        # 7. 提取房源信息
-        page_data = []
+        url = f"https://bj.5i5j.com/ershoufang/{region_code}/n{page_num}/"
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        html = await page.content()
+
         try:
-            # 直接使用类的 extract_information 方法，避免实例化
+            await page.wait_for_selector('ul.pList', timeout=5000)
+        except Exception:
+            if await page.query_selector('.anti-crawl'):
+                logger.warning(f"反爬 {region_name} P{page_num}")
+                return True, 0, (time.perf_counter() - t0) * 1000
+            if await page.query_selector('.login-prompt'):
+                logger.warning(f"需登录 {region_name} P{page_num}")
+                return True, 0, (time.perf_counter() - t0) * 1000
+            for sel in ['.n_no_data', '.no-result', '.empty-tip']:
+                if await page.query_selector(sel):
+                    return False, 0, (time.perf_counter() - t0) * 1000
+            return True, 0, (time.perf_counter() - t0) * 1000
+
+        soup = BeautifulSoup(html, 'lxml')
+        try:
             page_data = I5I5JScraperPlaywright.extract_information(soup)
-            logger.info(f"🔍 找到 {len(page_data)} 个房源")
         except Exception as e:
-            logger.error(f"❌ 提取数据失败: {e}")
-        
+            logger.error(f"提取失败 {region_name} P{page_num}: {e}")
+            return True, 0, (time.perf_counter() - t0) * 1000
+
         if page_data:
             for house in page_data:
                 house['region'] = region_name
-                # 直接在协程里使用同步的put，捕获队列满的异常
                 try:
-                    shared_queue.put(house, block=True, timeout=10)  # 10秒超时
-                except Exception as e:
-                    logger.warning(f"⚠️ 队列已满，跳过房源 {house.get('house_id', 'unknown')}: {e}")
-                    continue
-            logger.info(f"✅ 完成 {region_name} 第 {page_num} 页，获取 {len(page_data)} 条房源")
-            return True, len(page_data)
+                    shared_queue.put(house, block=True, timeout=10)
+                except Exception:
+                    logger.warning(f"队列满 {house.get('house_id', 'unknown')}")
+            return True, len(page_data), (time.perf_counter() - t0) * 1000
         else:
-            # 没有数据，返回False，让连续无数据计数增加
-            logger.info(f"⚠️ {region_name} 第 {page_num} 页无数据")
-            return False, 0
+            return False, 0, (time.perf_counter() - t0) * 1000
     except Exception as e:
-        logger.error(f"❌ 页面处理出错 {region_name} P{page_num}: {e}")
-        import traceback
-        logger.error(f"详细错误信息: {traceback.format_exc()}")
-        return True, 0  # 网络错误或其他异常，继续尝试下一页
+        logger.error(f"页面异常 {region_name} P{page_num}: {e}")
+        return True, 0, (time.perf_counter() - t0) * 1000
 
 async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_queue, window_size=3):
     """
@@ -147,71 +111,52 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
     
     try:
         for dist_code, dist_name in district_tasks.items():
-            # 为每个区域重新初始化爬虫，避免资源累积
-            logger.info(f"\n{'=' * 80}")
-            logger.info(f"🔄 为 {dist_name} 初始化新的爬虫实例")
-            logger.info(f"{'=' * 80}")
-            
             current_page = 1
-            max_page = 2000  # 增加最大页码，确保能爬取所有数据
-            restart_interval = 400  # 每批次处理的页面数
+            max_page = 2000
+            restart_interval = 400
             is_region_finished = False
             total_listings = 0
             region_start_time = time.time()
-            logger.info(f"🚀 开始并发扫描: {dist_name}")
-            
+            logger.info(f"🚀 {dist_name}: 开始扫描")
+
             while current_page <= max_page and not is_region_finished:
-                # 计算本次要爬取的页面范围
                 end_page = min(current_page + restart_interval - 1, max_page)
-                logger.info(f"\n{'=' * 80}")
-                logger.info(f"🔄 为 {dist_name} 初始化新的爬虫实例，处理页面 {current_page}-{end_page}")
-                logger.info(f"{'=' * 80}")
-                
-                # 重新初始化爬虫
+
                 scraper = I5I5JScraperPlaywright(debug_port=debug_port)
                 await scraper.connect()
-                
-                # 创建爬取页面
                 await scraper.create_pages(window_size)
-                
-                # 使用任务队列来管理页面，避免并发问题
+
                 page_queue = asyncio.Queue()
-                batch_no_data_count = 0  # 当前批次的连续无数据页面计数
-                max_no_data_pages = 3  # 连续无数据页面阈值
-                
-                # 预填充本次要爬取的页面队列
+                batch_no_data_count = 0
+                max_no_data_pages = 3
+                pages_processed = 0
+                last_progress_log = 0
+                progress_interval = 50
+
                 for page_num in range(current_page, end_page + 1):
                     await page_queue.put(page_num)
-                
-                # 异步任务池模式：始终保持有 window_size 个协程在跑
+
+                total_page_time = 0  # 累计页面耗时，用于算均速
+
                 async def task_worker(page):
-                    """单个页面的工作器"""
                     nonlocal is_region_finished, total_listings, batch_no_data_count, current_page
+                    nonlocal pages_processed, last_progress_log, total_page_time
                     while not is_region_finished:
                         try:
-                            # 从队列中获取页面，设置超时
                             page_num = await asyncio.wait_for(page_queue.get(), timeout=5)
-                            logger.info(f"📋 {dist_name} 任务分配: 开始处理第 {page_num} 页")
-                            
-                            # 处理页面
-                            success, listings_count = await process_page(page, dist_code, dist_name, page_num, shared_queue)
+                            success, listings_count, page_ms = await process_page(page, dist_code, dist_name, page_num, shared_queue)
                             total_listings += listings_count
-                            
-                            # 更新当前页码
+                            pages_processed += 1
+                            total_page_time += page_ms
                             current_page = max(current_page, page_num + 1)
-                            
-                            # 标记任务完成
                             page_queue.task_done()
-                            
-                            # 只有明确的"无数据"情况才停止爬取
+
                             if not success:
                                 batch_no_data_count += 1
-                                logger.info(f"📊 {dist_name} 第 {page_num} 页无数据，连续无数据页面数: {batch_no_data_count}")
                                 if batch_no_data_count >= max_no_data_pages:
-                                    logger.info(f"🛑 {dist_name} 连续 {max_no_data_pages} 页无数据，停止爬取")
+                                    avg_s = total_page_time / pages_processed / 1000
+                                    logger.info(f"🛑 {dist_name}: {pages_processed}页 {total_listings}条 均{avg_s:.1f}s/页 停止")
                                     is_region_finished = True
-                                    logger.info(f"🚫 已设置 {dist_name} 爬取结束标志")
-                                    # 清空队列，让其他worker尽快结束
                                     while not page_queue.empty():
                                         try:
                                             page_queue.get_nowait()
@@ -220,16 +165,15 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
                                             break
                                     break
                             else:
-                                # 有数据，重置无数据计数
                                 batch_no_data_count = 0
-                                logger.info(f"✅ {dist_name} 第 {page_num} 页处理完成，继续下一页")
+                                if pages_processed - last_progress_log >= progress_interval:
+                                    avg_s = total_page_time / pages_processed / 1000
+                                    logger.info(f"📖 {dist_name}: {pages_processed}页 {total_listings}条 均{avg_s:.1f}s/页")
+                                    last_progress_log = pages_processed
                         except asyncio.TimeoutError:
-                            # 队列已空，退出
-                            logger.info(f"⏰ {dist_name} 页面队列为空，worker 退出")
                             break
                         except Exception as e:
-                            logger.error(f"❌ {dist_name} 处理页面时出错: {e}")
-                            # 标记任务完成，避免队列阻塞
+                            logger.error(f"❌ {dist_name} P{page_num}: {e}")
                             try:
                                 page_queue.task_done()
                             except:
@@ -300,38 +244,53 @@ def global_db_consumer(queue, stop_event, db_config, regions):
         except Exception as e:
             logger.error(f"❌ 更新 {region} 区域状态失败: {e}")
     
-    # 队列深度监控
-    last_queue_check_time = time.time()
-    queue_check_interval = 10  # 每10秒检查一次队列深度
-    
+    price_check_map = {}  # {house_id: (web_price, web_unit_price)} 批次内价格比对缓存
+
+    # 启动时一次性加载全量二手房价格到内存，之后全部内存比对
+    logger.info("📥 加载全量二手房价格到内存...")
+    all_prices = db_manager.load_property_prices()
+    logger.info(f"📥 已加载 {len(all_prices)} 条价格记录")
+
     def process_batch():
-        """处理批量数据"""
-        nonlocal property_batch, price_batch
-        
+        """处理批量数据，全部内存比对，无 DB 查询"""
+        nonlocal property_batch, price_batch, price_check_map
+        t0 = time.perf_counter()
+
+        for house_id, (web_price, web_unit_price) in price_check_map.items():
+            last_price = all_prices.get(house_id)
+            if last_price is None:
+                price_batch.append({
+                    'house_id': house_id, 'price': web_price,
+                    'unit_price': web_unit_price,
+                    'record_date': datetime.now().strftime('%Y-%m-%d')
+                })
+            elif float(web_price) != float(last_price):
+                price_batch.append({
+                    'house_id': house_id, 'price': web_price,
+                    'unit_price': web_unit_price,
+                    'record_date': datetime.now().strftime('%Y-%m-%d')
+                })
+            # 更新内存中的价格，下次比对用最新值
+            all_prices[house_id] = web_price
+
+        t2 = time.perf_counter()
         if property_batch:
-            logger.info(f"📊 批量处理 {len(property_batch)} 条房源数据")
             db_manager.batch_insert_property_details(property_batch)
             property_batch = []
-        
+        prop_ms = (time.perf_counter() - t2) * 1000
+
+        t3 = time.perf_counter()
         if price_batch:
-            logger.info(f"📊 批量处理 {len(price_batch)} 条价格历史数据")
             db_manager.batch_insert_price_history(price_batch)
             price_batch = []
+        price_ms = (time.perf_counter() - t3) * 1000
+        price_check_map = {}
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"📊 批次: 写房={prop_ms:.0f}ms 写价={price_ms:.0f}ms 共{total_ms:.0f}ms")
     
     while True:
         try:
-            # 检查队列深度
-            current_time = time.time()
-            if current_time - last_queue_check_time >= queue_check_interval:
-                # 使用 empty() 方法替代 qsize()，避免 NotImplementedError
-                if queue.empty():
-                    logger.info("📊 队列深度: 0 (队列为空)")
-                    # 队列为空时处理剩余数据
-                    process_batch()
-                else:
-                    logger.info("📊 队列深度: 非空")
-                last_queue_check_time = current_time
-            
             # 从队列中获取数据，超时5秒
             try:
                 item = queue.get(timeout=5)
@@ -377,32 +336,9 @@ def global_db_consumer(queue, stop_event, db_config, regions):
                 'last_update_date': web_update_time
             }
             property_batch.append(property_data)
-            
-            # 检查是否需要插入价格历史
-            exists = db_manager.get_property(house_id)
-            if not exists:
-                # 新房源，插入价格历史
-                price_data = {
-                    'house_id': house_id,
-                    'price': web_price,
-                    'unit_price': listing.get('unit_price', 0),
-                    'record_date': datetime.now().strftime('%Y-%m-%d')
-                }
-                price_batch.append(price_data)
-            else:
-                # 老房源，检查价格是否变化
-                last_price = db_manager.get_latest_price(house_id)
-                if float(web_price) != float(last_price):
-                    # 价格变了，插入价格历史
-                    price_data = {
-                        'house_id': house_id,
-                        'price': web_price,
-                        'unit_price': listing.get('unit_price', 0),
-                        'record_date': datetime.now().strftime('%Y-%m-%d')
-                    }
-                    price_batch.append(price_data)
-            
-            # 达到批量大小，执行批量处理
+            price_check_map[house_id] = (web_price, listing.get('unit_price', 0))
+
+            # 达到批量大小，执行批量处理（含一次 DB 查询比对价格）
             if len(property_batch) >= batch_size:
                 process_batch()
             

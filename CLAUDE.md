@@ -51,14 +51,17 @@ config/settings.py                     → All configuration, loaded from .env w
 
 ## Database
 
-PostgreSQL (`house_data`) with 4 tables auto-created by `DatabaseManager._init_db()`:
+PostgreSQL (`house_data`) with 7 tables auto-created by `DatabaseManager._init_db()`:
 
 | Table | Purpose |
 |---|---|
-| `property_details` | Master table: house_id, price, area, status, time tracking |
-| `price_history` | Price change log — only inserted on price change |
-| `district_snapshots` | Daily per-district aggregates: listing count, avg/median/weighted unit price |
-| `community_info` | Community geo-info: coordinates, town_id, town_name |
+| `property_details` | 二手房主表: house_id, price, area, status, community_id |
+| `price_history` | 价格变动日志 — only inserted on price change |
+| `district_snapshots` | 每日区域二手房大盘: listing count, avg/median/weighted unit price |
+| `community_info` | 小区信息: coordinates, town_id, town_name |
+| `rental_details` | 租房主表: house_id, rent_price, rent_type(整租/合租), area, community_id |
+| `rent_history` | 租金变动日志 |
+| `district_rent_snapshots` | 每日区域租赁大盘 |
 
 ## Configuration
 
@@ -69,6 +72,23 @@ All config in `.env`, loaded by `config/settings.py`. Key variables:
 - `I5I5J_PHONE/I5I5J_PASSWORD` — 5i5j login credentials
 
 Settings are accessed as `from config.settings import DB_CONFIG, CHROME_DEBUG_PORT, SCRAPER_CONFIG, ...`.
+
+## Metabase workflow
+
+**Before any Metabase task**, first read the relevant memory files:
+- `memory/feedback_metabase_workflow.md` — 完整工作流
+- `memory/reference_dashboard_2_structure.md` — 看板快照（tabs/cards/filters/patterns）
+- `memory/feedback_test_after_dashboard_change.md` — 完成后必须全参数测试
+
+**Key rules:**
+1. export/ 下的 JSON **只读不写** — 用于理解结构，不是编辑源
+2. 参考已有卡片写法（SQL、template-tags、parameters），照抄再改
+3. 通过 API 创建/修改卡片和看板
+4. 完成后全参数测试，确认无误再交付
+5. 拉取最新 JSON 到 export/，更新 memory 快照
+
+**API docs:** `metabase-data/api.json`（本地文件）
+**Metabase:** http://localhost:3000 (liuziyang101@gmail.com / mysj113598)
 
 ## District mapping
 

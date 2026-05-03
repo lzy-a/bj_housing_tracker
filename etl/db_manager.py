@@ -482,7 +482,55 @@ class DatabaseManager:
         finally:
             cursor.close()
             self._return_connection(conn)
-    
+
+    def load_property_prices(self) -> dict:
+        """启动时一次加载全量二手房 id → 最新价格，之后全部内存比对"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                WITH latest_ph AS (
+                    SELECT DISTINCT ON (house_id) house_id, price
+                    FROM price_history
+                    ORDER BY house_id, record_date DESC
+                )
+                SELECT pd.house_id, COALESCE(lp.price, pd.price) AS last_price
+                FROM property_details pd
+                LEFT JOIN latest_ph lp ON pd.house_id = lp.house_id
+                WHERE pd.status = 1
+            ''')
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"加载二手房价格失败: {e}")
+            return {}
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def load_rent_prices(self) -> dict:
+        """启动时一次加载全量租房 id → 最新租金，之后全部内存比对"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                WITH latest_rh AS (
+                    SELECT DISTINCT ON (house_id) house_id, rent_price
+                    FROM rent_history
+                    ORDER BY house_id, record_date DESC
+                )
+                SELECT rd.house_id, COALESCE(lr.rent_price, rd.rent_price) AS last_rent
+                FROM rental_details rd
+                LEFT JOIN latest_rh lr ON rd.house_id = lr.house_id
+                WHERE rd.status = 1
+            ''')
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"加载租房价格失败: {e}")
+            return {}
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
     def update_property_status(self, house_id: str = None, region: str = None, status: int = None, last_seen_date: str = None, last_update_date: str = None):
         """更新房源状态"""
         conn = self._get_connection()
@@ -536,55 +584,43 @@ class DatabaseManager:
         try:
             # 使用 execute_values 进行批量插入
             from psycopg2.extras import execute_values
-            
+
             today = datetime.now().date()
-            values = []
-            
-            for prop in properties:
-                # 检查房源是否已存在
-                cursor.execute('SELECT first_seen_date FROM property_details WHERE house_id = %s', (prop['house_id'],))
-                result = cursor.fetchone()
-                
-                if result:
-                    # 已存在，更新
-                    cursor.execute('''
-                        UPDATE property_details
-                        SET title = %s, region = %s, biz_circle = %s, community = %s, community_id = %s,
-                            layout = %s, area = %s, price = %s, unit_price = %s, orientation = %s,
-                            decoration = %s, floor_info = %s, building_type = %s, build_year = %s,
-                            address_raw = %s, last_seen_date = %s, last_update_date = %s,
-                            status = 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE house_id = %s
-                    ''', (prop['title'], prop['region'], prop['biz_circle'], prop['community'],
-                          prop.get('community_id'), prop['layout'],
-                          prop['area'], prop['price'], prop['unit_price'], prop['orientation'], prop['decoration'],
-                          prop['floor_info'], prop['building_type'], prop['build_year'], prop['address_raw'],
-                          today, prop['last_update_date'], prop['house_id']))
-                else:
-                    # 不存在，插入
-                    values.append((
-                        prop['house_id'], prop['title'], prop['region'], prop['biz_circle'], prop['community'],
-                        prop.get('community_id'),
-                        prop['layout'], prop['area'], prop['price'], prop['unit_price'], prop['orientation'],
-                        prop['decoration'], prop['floor_info'], prop['building_type'], prop['build_year'],
-                        prop['address_raw'], today, today, prop['last_update_date'], 1
-                    ))
-            
-            # 批量插入新记录
-            if values:
-                execute_values(
-                    cursor,
-                    '''
-                    INSERT INTO property_details
-                    (house_id, title, region, biz_circle, community, community_id,
-                    layout, area, price, unit_price, orientation, decoration, floor_info,
-                    building_type, build_year, address_raw,
-                    first_seen_date, last_seen_date, last_update_date, status)
-                    VALUES %s
-                    ON CONFLICT (house_id) DO NOTHING
-                    ''',
-                    values
-                )
+            values = [(prop['house_id'], prop['title'], prop['region'], prop['biz_circle'],
+                       prop['community'], prop.get('community_id'), prop['layout'], prop['area'],
+                       prop['price'], prop['unit_price'], prop['orientation'], prop['decoration'],
+                       prop['floor_info'], prop['building_type'], prop['build_year'],
+                       prop['address_raw'], today, today, prop['last_update_date'], 1)
+                      for prop in properties]
+
+            execute_values(cursor, '''
+                INSERT INTO property_details
+                (house_id, title, region, biz_circle, community, community_id,
+                layout, area, price, unit_price, orientation, decoration, floor_info,
+                building_type, build_year, address_raw,
+                first_seen_date, last_seen_date, last_update_date, status)
+                VALUES %s
+                ON CONFLICT (house_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    region = EXCLUDED.region,
+                    biz_circle = EXCLUDED.biz_circle,
+                    community = EXCLUDED.community,
+                    community_id = EXCLUDED.community_id,
+                    layout = EXCLUDED.layout,
+                    area = EXCLUDED.area,
+                    price = EXCLUDED.price,
+                    unit_price = EXCLUDED.unit_price,
+                    orientation = EXCLUDED.orientation,
+                    decoration = EXCLUDED.decoration,
+                    floor_info = EXCLUDED.floor_info,
+                    building_type = EXCLUDED.building_type,
+                    build_year = EXCLUDED.build_year,
+                    address_raw = EXCLUDED.address_raw,
+                    last_seen_date = EXCLUDED.last_seen_date,
+                    last_update_date = EXCLUDED.last_update_date,
+                    status = 1,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', values)
             
             conn.commit()
             logger.info(f"批量插入/更新 {len(properties)} 条房源详情")
@@ -697,41 +733,35 @@ class DatabaseManager:
             from psycopg2.extras import execute_values
 
             today = datetime.now().date()
-            values = []
+            values = [(r['house_id'], r.get('community_id'), r['title'], r['region'],
+                       r['biz_circle'], r['community'], r['layout'], r['area'],
+                       r['rent_price'], r.get('rent_type', '整租'), r['orientation'],
+                       r['decoration'], r['floor_info'], today, today, 1)
+                      for r in rentals]
 
-            for r in rentals:
-                cursor.execute('SELECT first_seen_date FROM rental_details WHERE house_id = %s', (r['house_id'],))
-                result = cursor.fetchone()
-
-                if result:
-                    cursor.execute('''
-                        UPDATE rental_details
-                        SET title = %s, region = %s, biz_circle = %s, community = %s, community_id = %s,
-                            layout = %s, area = %s, rent_price = %s, rent_type = %s,
-                            orientation = %s, decoration = %s, floor_info = %s,
-                            last_seen_date = %s, status = 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE house_id = %s
-                    ''', (r['title'], r['region'], r['biz_circle'], r['community'],
-                          r.get('community_id'), r['layout'], r['area'], r['rent_price'],
-                          r.get('rent_type', '整租'), r['orientation'], r['decoration'],
-                          r['floor_info'], today, r['house_id']))
-                else:
-                    values.append((
-                        r['house_id'], r.get('community_id'), r['title'], r['region'],
-                        r['biz_circle'], r['community'], r['layout'], r['area'],
-                        r['rent_price'], r.get('rent_type', '整租'), r['orientation'],
-                        r['decoration'], r['floor_info'], today, today, 1
-                    ))
-
-            if values:
-                execute_values(cursor, '''
-                    INSERT INTO rental_details
-                    (house_id, community_id, title, region, biz_circle, community,
-                     layout, area, rent_price, rent_type, orientation, decoration,
-                     floor_info, first_seen_date, last_seen_date, status)
-                    VALUES %s
-                    ON CONFLICT (house_id) DO NOTHING
-                ''', values)
+            execute_values(cursor, '''
+                INSERT INTO rental_details
+                (house_id, community_id, title, region, biz_circle, community,
+                 layout, area, rent_price, rent_type, orientation, decoration,
+                 floor_info, first_seen_date, last_seen_date, status)
+                VALUES %s
+                ON CONFLICT (house_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    region = EXCLUDED.region,
+                    biz_circle = EXCLUDED.biz_circle,
+                    community = EXCLUDED.community,
+                    community_id = EXCLUDED.community_id,
+                    layout = EXCLUDED.layout,
+                    area = EXCLUDED.area,
+                    rent_price = EXCLUDED.rent_price,
+                    rent_type = EXCLUDED.rent_type,
+                    orientation = EXCLUDED.orientation,
+                    decoration = EXCLUDED.decoration,
+                    floor_info = EXCLUDED.floor_info,
+                    last_seen_date = EXCLUDED.last_seen_date,
+                    status = 1,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', values)
 
             conn.commit()
             logger.info(f"批量插入/更新 {len(rentals)} 条租房房源")

@@ -43,45 +43,42 @@ def calc_district_rent_stats(rent_prices, areas):
 
 
 async def process_page(page, region_code, region_name, page_num, shared_queue):
-    """处理单个租房页面"""
+    """处理单个租房页面，返回 (success, listing_count, elapsed_ms)"""
+    t0 = time.perf_counter()
     try:
         url = f"https://bj.5i5j.com/zufang/{region_code}/n{page_num}/"
-        logger.info(f"🚀 [租房] {region_name} 第 {page_num} 页: {url}")
 
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         html = await page.content()
 
         try:
             await page.wait_for_selector('ul.pList', timeout=5000)
-            logger.info(f"✅ [租房] {region_name} 第 {page_num} 页已加载")
-        except Exception as e:
-            logger.warning(f"⚠️ [租房] {region_name} 第 {page_num} 页未找到房源列表: {e}")
-            no_data_selectors = ['.n_no_data', '.no-result', '.empty-tip']
-            for selector in no_data_selectors:
-                no_data = await page.query_selector(selector)
-                if no_data:
-                    logger.info(f"🛑 [租房] {region_name} 确实没数据了")
-                    return False, 0
-            return True, 0
+        except Exception:
+            for sel in ['.n_no_data', '.no-result', '.empty-tip']:
+                if await page.query_selector(sel):
+                    return False, 0, (time.perf_counter() - t0) * 1000
+            return True, 0, (time.perf_counter() - t0) * 1000
 
         soup = BeautifulSoup(html, 'lxml')
-        page_data = I5I5JRentScraperPlaywright.extract_information(soup)
-        logger.info(f"🔍 [租房] 找到 {len(page_data)} 个房源")
+        try:
+            page_data = I5I5JRentScraperPlaywright.extract_information(soup)
+        except Exception as e:
+            logger.error(f"提取失败 [租房] {region_name} P{page_num}: {e}")
+            return True, 0, (time.perf_counter() - t0) * 1000
 
         if page_data:
             for house in page_data:
                 house['region'] = region_name
                 try:
                     shared_queue.put(house, block=True, timeout=10)
-                except Exception as e:
-                    logger.warning(f"⚠️ 队列已满，跳过 {house.get('house_id')}: {e}")
-            return True, len(page_data)
+                except Exception:
+                    logger.warning(f"队列满 [租房] {house.get('house_id')}")
+            return True, len(page_data), (time.perf_counter() - t0) * 1000
         else:
-            logger.info(f"⚠️ [租房] {region_name} 第 {page_num} 页无数据")
-            return False, 0
+            return False, 0, (time.perf_counter() - t0) * 1000
     except Exception as e:
-        logger.error(f"❌ [租房] 页面处理出错 {region_name} P{page_num}: {e}")
-        return True, 0
+        logger.error(f"页面异常 [租房] {region_name} P{page_num}: {e}")
+        return True, 0, (time.perf_counter() - t0) * 1000
 
 
 async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, window_size=3):
@@ -95,14 +92,13 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
 
     try:
         for dist_code, dist_name in district_tasks.items():
-            logger.info(f"\n{'=' * 80}")
-            logger.info(f"🔄 [租房] 开始爬取: {dist_name}")
-
             current_page = 1
             max_page = 2000
             restart_interval = 400
             is_region_finished = False
             total_listings = 0
+
+            logger.info(f"🚀 [租房] {dist_name}: 开始扫描 (页={current_page}-{max_page})")
 
             while current_page <= max_page and not is_region_finished:
                 end_page = min(current_page + restart_interval - 1, max_page)
@@ -118,20 +114,30 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
                 for page_num in range(current_page, end_page + 1):
                     await page_queue.put(page_num)
 
+                pages_processed = 0
+                last_progress_log = 0
+                progress_interval = 50
+
+                total_page_time = 0
+
                 async def task_worker(page):
                     nonlocal is_region_finished, total_listings, batch_no_data_count, current_page
+                    nonlocal pages_processed, last_progress_log, total_page_time
                     while not is_region_finished:
                         try:
                             page_num = await asyncio.wait_for(page_queue.get(), timeout=5)
-                            success, listings_count = await process_page(page, dist_code, dist_name, page_num, shared_queue)
+                            success, listings_count, page_ms = await process_page(page, dist_code, dist_name, page_num, shared_queue)
                             total_listings += listings_count
+                            pages_processed += 1
+                            total_page_time += page_ms
                             current_page = max(current_page, page_num + 1)
                             page_queue.task_done()
 
                             if not success:
                                 batch_no_data_count += 1
                                 if batch_no_data_count >= max_no_data_pages:
-                                    logger.info(f"🛑 [租房] {dist_name} 连续 {max_no_data_pages} 页无数据")
+                                    avg_s = total_page_time / pages_processed / 1000
+                                    logger.info(f"🛑 [租房] {dist_name}: {pages_processed}页 {total_listings}条 均{avg_s:.1f}s/页 停止")
                                     is_region_finished = True
                                     while not page_queue.empty():
                                         try:
@@ -142,6 +148,10 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
                                     break
                             else:
                                 batch_no_data_count = 0
+                                if pages_processed - last_progress_log >= progress_interval:
+                                    avg_s = total_page_time / pages_processed / 1000
+                                    logger.info(f"📖 [租房] {dist_name}: {pages_processed}页 {total_listings}条 均{avg_s:.1f}s/页")
+                                    last_progress_log = pages_processed
                         except asyncio.TimeoutError:
                             break
 
@@ -168,6 +178,12 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
     batch_size = 500
     property_batch = []
     price_batch = []
+    price_check_map = {}  # {house_id: rent_price} 批次内租金比对缓存
+
+    # 启动时一次性加载全量租金到内存，之后全部内存比对
+    logger.info("📥 [租房] 加载全量租金到内存...")
+    all_rents = db_manager.load_rent_prices()
+    logger.info(f"📥 [租房] 已加载 {len(all_rents)} 条租金记录")
 
     for region in regions:
         try:
@@ -182,13 +198,38 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             logger.error(f"❌ [租房] 更新 {region} 状态失败: {e}")
 
     def process_batch():
-        nonlocal property_batch, price_batch
+        nonlocal property_batch, price_batch, price_check_map
+        t0 = time.perf_counter()
+
+        for house_id, rent_price in price_check_map.items():
+            last_rent = all_rents.get(house_id)
+            if last_rent is None:
+                price_batch.append({
+                    'house_id': house_id, 'rent_price': rent_price,
+                    'record_date': datetime.now().strftime('%Y-%m-%d')
+                })
+            elif float(rent_price) != float(last_rent):
+                price_batch.append({
+                    'house_id': house_id, 'rent_price': rent_price,
+                    'record_date': datetime.now().strftime('%Y-%m-%d')
+                })
+            all_rents[house_id] = rent_price
+
+        t2 = time.perf_counter()
         if property_batch:
             db_manager.batch_insert_rental_details(property_batch)
             property_batch = []
+        prop_ms = (time.perf_counter() - t2) * 1000
+
+        t3 = time.perf_counter()
         if price_batch:
             db_manager.batch_insert_rent_history(price_batch)
             price_batch = []
+        price_ms = (time.perf_counter() - t3) * 1000
+        price_check_map = {}
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"📊 [租房] 批次: 写房={prop_ms:.0f}ms 写价={price_ms:.0f}ms 共{total_ms:.0f}ms")
 
     while True:
         try:
@@ -227,34 +268,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
                 'floor_info': listing.get('floor_info', ''),
             })
 
-            # 新房源 → 插入租金历史
-            conn = db_manager._get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT house_id FROM rental_details WHERE house_id = %s', (house_id,))
-            exists = cursor.fetchone()
-            cursor.close()
-            db_manager._return_connection(conn)
-
-            if not exists:
-                price_batch.append({
-                    'house_id': house_id,
-                    'rent_price': rent_price,
-                    'record_date': datetime.now().strftime('%Y-%m-%d')
-                })
-            else:
-                # 检查租金是否变化
-                conn = db_manager._get_connection()
-                cursor = conn.cursor()
-                cursor.execute('SELECT rent_price FROM rent_history WHERE house_id = %s ORDER BY record_date DESC LIMIT 1', (house_id,))
-                result = cursor.fetchone()
-                cursor.close()
-                db_manager._return_connection(conn)
-                if result and float(rent_price) != float(result[0]):
-                    price_batch.append({
-                        'house_id': house_id,
-                        'rent_price': rent_price,
-                        'record_date': datetime.now().strftime('%Y-%m-%d')
-                    })
+            price_check_map[house_id] = rent_price
 
             if len(property_batch) >= batch_size:
                 process_batch()
@@ -262,7 +276,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             # 实时账本
             if region not in ledger:
                 ledger[region] = {'rent_prices': [], 'areas': []}
-            if rent_price > 0 and listing.get('area', 0) > 0:
+            if rent_price > 0 and listing.get('area', 0) > 0 and listing.get('rent_type', '整租') == '整租':
                 ledger[region]['rent_prices'].append(rent_price)
                 ledger[region]['areas'].append(listing['area'])
 

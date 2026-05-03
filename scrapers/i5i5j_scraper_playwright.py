@@ -284,8 +284,6 @@ class I5I5JScraperPlaywright:
                 return data
 
             items = house_list.find_all('li', recursive=False)
-            logger.info(f"📦 找到 {len(items)} 个房源")
-
             for house_item in items:
                 try:
                     if house_item.get('style') == 'display:none;':
@@ -351,7 +349,6 @@ class I5I5JScraperPlaywright:
                     logger.debug(f"解析房源失败: {e}")
                     continue
 
-            logger.info(f"✅ 提取 {len(data)} 条有效房源")
             return data
         except Exception as e:
             logger.error(f"提取失败: {e}")

@@ -124,7 +124,8 @@ class I5I5JRentScraperPlaywright:
         layout, area, orientation, floor, decoration = '未知', None, '未知', '未知', '未知'
         for part in info_parts:
             if ('室' in part or '房间' in part) and '地下' not in part:
-                layout = part
+                # 归一化：去空格，标准化为紧凑格式
+                layout = part.replace(' ', '')
             elif '平米' in part or '㎡' in part:
                 m = re.search(r'(\d+\.?\d*)', part)
                 if m:
@@ -233,8 +234,6 @@ class I5I5JRentScraperPlaywright:
                 return data
 
             items = house_list.find_all('li', recursive=False)
-            logger.info(f"找到 {len(items)} 个租房房源")
-
             for house_item in items:
                 try:
                     if house_item.get('style') == 'display:none;':
@@ -297,7 +296,6 @@ class I5I5JRentScraperPlaywright:
                     logger.debug(f"解析租房房源失败: {e}")
                     continue
 
-            logger.info(f"提取 {len(data)} 条有效租房房源")
             return data
         except Exception as e:
             logger.error(f"提取失败: {e}")
