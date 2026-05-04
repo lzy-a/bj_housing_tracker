@@ -420,7 +420,7 @@ def global_db_consumer(queue, stop_event, db_config, regions):
     if processed_count > 0:
         avg_time_per_item = total_time / processed_count * 1000
         logger.info(f"⚡ 平均每条房源处理时间: {avg_time_per_item:.2f} 毫秒")
-        print(f'__STATS__{{"count": {processed_count}, "avg_ms": {avg_time_per_item:.1f}}}')
+        print(f'__STATS__{{"count": {processed_count}, "avg_ms": {avg_time_per_item:.1f}}}', flush=True)
     
     # 打印各区摘要信息
     logger.info("\n📊 各区数据摘要:")

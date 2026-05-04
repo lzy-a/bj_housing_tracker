@@ -326,7 +326,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
     logger.info(f"⏱️  [租房] 数据库写入线程耗时: {total_time:.2f} 秒")
     if processed_count > 0:
         logger.info(f"⚡ [租房] 平均每条房源处理时间: {avg_ms:.2f} 毫秒")
-        print(f'__STATS__{{"count": {processed_count}, "avg_ms": {avg_ms:.1f}}}')
+        print(f'__STATS__{{"count": {processed_count}, "avg_ms": {avg_ms:.1f}}}', flush=True)
 
 
 def main():
