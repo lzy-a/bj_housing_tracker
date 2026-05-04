@@ -277,7 +277,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             # 实时账本
             if region not in ledger:
                 ledger[region] = {'rent_prices': [], 'areas': []}
-            if rent_price > 0 and listing.get('area', 0) > 0 and listing.get('rent_type', '整租') == '整租':
+            if rent_price >= 100 and listing.get('area', 0) > 0 and listing.get('rent_type', '整租') == '整租':
                 ledger[region]['rent_prices'].append(rent_price)
                 ledger[region]['areas'].append(listing['area'])
 
