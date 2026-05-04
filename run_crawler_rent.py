@@ -230,7 +230,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
         price_check_map = {}
 
         total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"📊 [租房] 批次: 写房={prop_ms:.0f}ms 写价={price_ms:.0f}ms 共{total_ms:.0f}ms")
+        # logger.info(f"📊 [租房] 批次: 写房={prop_ms:.0f}ms 写价={price_ms:.0f}ms 共{total_ms:.0f}ms")
 
     while True:
         try:
@@ -320,7 +320,13 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             except Exception as e:
                 logger.error(f"❌ [租房] 标记 {region} 消失房源失败: {e}")
 
+    total_time = time.time() - start_time
+    avg_ms = total_time / processed_count * 1000 if processed_count > 0 else 0
     logger.info(f"🏁 [租房] 数据库写入完成，共 {processed_count} 条")
+    logger.info(f"⏱️  [租房] 数据库写入线程耗时: {total_time:.2f} 秒")
+    if processed_count > 0:
+        logger.info(f"⚡ [租房] 平均每条房源处理时间: {avg_ms:.2f} 毫秒")
+        print(f'__STATS__{{"count": {processed_count}, "avg_ms": {avg_ms:.1f}}}')
 
 
 def main():

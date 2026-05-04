@@ -6,6 +6,7 @@
 import subprocess
 import sys
 import time
+import json
 import requests
 import argparse
 
@@ -63,17 +64,32 @@ def shutdown_chrome():
 
 
 def run_step(name, script, *args):
-    """运行一个爬虫步骤"""
+    """运行一个爬虫步骤，返回 (success, stats_dict)"""
     print(f"\n{'=' * 60}")
     print(f"🚀 {name}")
     print(f"{'=' * 60}")
     cmd = [sys.executable, script] + list(args)
-    result = subprocess.run(cmd, cwd=sys.path[0] or ".")
-    if result.returncode != 0:
-        print(f"❌ {name} 失败 (exit={result.returncode})")
-        return False
+
+    stats = {}
+    with subprocess.Popen(cmd, cwd=sys.path[0] or ".", stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, bufsize=1) as p:
+        for line in p.stdout:
+            # 结构化数据行不打印，留给 run_all 整合
+            if line.startswith('__STATS__'):
+                try:
+                    stats = json.loads(line[len('__STATS__'):])
+                except json.JSONDecodeError:
+                    pass
+            else:
+                sys.stdout.write(line)
+        p.wait()
+
+    if p.returncode != 0:
+        print(f"❌ {name} 失败 (exit={p.returncode})")
+        return False, {}
+
     print(f"✅ {name} 完成")
-    return True
+    return True, stats
 
 
 def main():
@@ -96,15 +112,26 @@ def main():
     if not args.sale_only:
         scripts.append(("租房", "run_crawler_rent.py"))
 
+    total_start = time.time()
     for name, script in scripts:
-        if not run_step(name, script, *region_args):
+        t0 = time.time()
+        ok, stats = run_step(name, script, *region_args)
+        if not ok:
             shutdown_chrome()
             sys.exit(1)
+        elapsed = time.time() - t0
+        count = stats.get('count', '?')
+        avg_ms = stats.get('avg_ms', None)
+        speed_info = f"{count}条"
+        if avg_ms:
+            speed_info += f", 均{avg_ms:.0f}ms/条"
+        print(f"⏱️  {name}: {elapsed:.0f}s | {speed_info}")
 
     shutdown_chrome()
 
+    total_elapsed = time.time() - total_start
     print(f"\n{'=' * 60}")
-    print("🎉 全部完成！二手房 + 租房数据已入库，社区指标已更新")
+    print(f"🎉 全部完成！总耗时 {total_elapsed:.0f}s（{total_elapsed/60:.1f}min）")
     print(f"{'=' * 60}")
 
 

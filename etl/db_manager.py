@@ -585,6 +585,9 @@ class DatabaseManager:
             # 使用 execute_values 进行批量插入
             from psycopg2.extras import execute_values
 
+            # 批次内去重：同 house_id 保留最后一条
+            properties = list({p['house_id']: p for p in properties}.values())
+
             today = datetime.now().date()
             values = [(prop['house_id'], prop['title'], prop['region'], prop['biz_circle'],
                        prop['community'], prop.get('community_id'), prop['layout'], prop['area'],
@@ -731,6 +734,9 @@ class DatabaseManager:
         cursor = conn.cursor()
         try:
             from psycopg2.extras import execute_values
+
+            # 批次内去重：同 house_id 保留最后一条
+            rentals = list({r['house_id']: r for r in rentals}.values())
 
             today = datetime.now().date()
             values = [(r['house_id'], r.get('community_id'), r['title'], r['region'],
