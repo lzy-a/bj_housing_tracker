@@ -113,6 +113,7 @@ def main():
         scripts.append(("租房", "run_crawler_rent.py"))
 
     total_start = time.time()
+    summaries = []
     for name, script in scripts:
         t0 = time.time()
         ok, stats = run_step(name, script, *region_args)
@@ -121,17 +122,21 @@ def main():
             sys.exit(1)
         elapsed = time.time() - t0
         count = stats.get('count', '?')
-        avg_ms = stats.get('avg_ms', None)
-        speed_info = f"{count}条"
+        avg_ms = stats.get('avg_ms')
+        w = sum(2 if ord(c) > 127 else 1 for c in name)
+        name_pad = name + ' ' * (6 - w)  # CJK 占 2 列，补到等宽
         if avg_ms:
-            speed_info += f", 均{avg_ms:.0f}ms/条"
-        print(f"⏱️  {name}: {elapsed:.0f}s | {speed_info}")
+            summaries.append(f"  {name_pad}: {elapsed:.0f}s | {count}条 | 均{avg_ms:.1f}ms/条")
+        else:
+            summaries.append(f"  {name_pad}: {elapsed:.0f}s | {count}条")
 
     shutdown_chrome()
 
     total_elapsed = time.time() - total_start
     print(f"\n{'=' * 60}")
-    print(f"🎉 全部完成！总耗时 {total_elapsed:.0f}s（{total_elapsed/60:.1f}min）")
+    for s in summaries:
+        print(s)
+    print(f"🎉 总耗时 {total_elapsed:.0f}s（{total_elapsed/60:.1f}min）")
     print(f"{'=' * 60}")
 
 
