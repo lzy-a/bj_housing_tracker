@@ -13,7 +13,9 @@ from datetime import datetime
 import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config.settings import I5I5J_PHONE, I5I5J_PASSWORD
+from config.settings import I5I5J_PHONE, I5I5J_PHONE_2, I5I5J_PASSWORD
+
+import random
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,60 +90,99 @@ class I5I5JScraperPlaywright:
     async def check_and_login(self):
         """检查是否需要登录并自动登录"""
         logger.info("🔐 开始检查登录状态")
-        
-        # 创建一个临时页面来检测登录状态
         login_check_page = await self.context.new_page()
-        
+
         try:
-            # 导航到特定页面来检测登录状态
-            login_check_url = "https://bj.5i5j.com/ershoufang/xichengqu/n1/"
-            logger.info(f"🚀 导航到登录检测页面: {login_check_url}")
-            
-            # 导航到页面，等待网络空闲
-            await login_check_page.goto(login_check_url, wait_until="networkidle", timeout=30000)
-            
-            # 检查是否是登录页面
-            login_tab = await login_check_page.query_selector('.login-tab[data-type="password-login"]')
-            if login_tab:
-                logger.info("🔐 检测到登录页面，开始自动登录")
-                
-                # 点击密码登录选项
-                await login_tab.click()
-                logger.info("✅ 点击了密码登录选项")
-                
-                # 等待输入框出现
-                await login_check_page.wait_for_selector('#phone1', timeout=5000)
-                await login_check_page.wait_for_selector('.password', timeout=5000)
-                
-                # 输入账号密码
-                phone = I5I5J_PHONE
-                password = I5I5J_PASSWORD
-                
-                await login_check_page.fill('#phone1', phone)
-                await login_check_page.fill('.password', password)
-                logger.info("✅ 输入了账号密码")
-                
-                # 点击登录按钮
-                login_button = await login_check_page.query_selector('#login-submit')
-                if login_button:
-                    await login_button.click()
-                    logger.info("✅ 点击了登录按钮")
-                    
-                    # 等待登录完成
-                    await login_check_page.wait_for_load_state('networkidle', timeout=15000)
-                    logger.info("✅ 登录完成")
-                    
-                    # 等待3秒，确保登录状态完全保存
-                    logger.info("⏳ 等待3秒，确保登录状态完全保存")
-                    await asyncio.sleep(3)
-                else:
-                    logger.error("❌ 未找到登录按钮")
-            else:
-                logger.info("✅ 未检测到登录页面，继续操作")
-        except Exception as e:
-            logger.error(f"❌ 自动登录失败: {e}")
+            MAX_RETRIES = 2
+            for attempt in range(MAX_RETRIES):
+                try:
+                    login_check_url = "https://bj.5i5j.com/ershoufang/xichengqu/n1/"
+                    logger.info(f"🚀 导航到登录检测页面 (第{attempt+1}次): {login_check_url}")
+
+                    # domcontentloaded 比 networkidle 可靠，避免因持续网络请求假超时
+                    await login_check_page.goto(login_check_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(2)
+
+                    # 处理反爬验证
+                    try:
+                        body_text = await login_check_page.inner_text('body')
+                        if '点击页面或移动鼠标' in body_text:
+                            logger.info("检测到反爬验证页面，模拟点击...")
+                            await login_check_page.mouse.move(random.randint(100, 500), random.randint(100, 400))
+                            await asyncio.sleep(0.3)
+                            await login_check_page.mouse.click(random.randint(100, 500), random.randint(100, 400))
+                            await login_check_page.wait_for_load_state('networkidle', timeout=15000)
+                            await asyncio.sleep(2)
+                    except Exception:
+                        pass
+
+                    # 用 wait_for_selector 而非 query_selector：给 JS 渲染登录表单的时间
+                    try:
+                        login_tab = await login_check_page.wait_for_selector(
+                            '.login-tab[data-type="password-login"]', timeout=3000
+                        )
+                    except Exception:
+                        login_tab = None
+
+                    if login_tab:
+                        logger.info("🔐 检测到登录页面，开始自动登录")
+                        await login_tab.click()
+
+                        await login_check_page.wait_for_selector('#phone1', timeout=5000)
+                        await login_check_page.wait_for_selector('.password', timeout=5000)
+
+                        phone = random.choice([I5I5J_PHONE, I5I5J_PHONE_2])
+                        password = I5I5J_PASSWORD
+                        logger.info(f"使用账号: {phone[:3]}****{phone[-4:]}")
+
+                        await login_check_page.fill('#phone1', phone)
+                        await login_check_page.fill('.password', password)
+
+                        try:
+                            login_button = await login_check_page.wait_for_selector('#login-submit', timeout=3000)
+                        except Exception:
+                            logger.error("❌ 未找到登录按钮")
+                            continue
+
+                        await login_button.click()
+                        logger.info("✅ 点击了登录按钮")
+
+                        # 验证登录成功：等房源列表出现，而非盲目等 networkidle
+                        try:
+                            await login_check_page.wait_for_selector('ul.pList', timeout=15000)
+                            logger.info("✅ 登录成功，房源列表可见")
+                        except Exception:
+                            still_login = await login_check_page.query_selector('.login-tab')
+                            if still_login:
+                                logger.warning("⚠️ 登录后仍在登录页，重试")
+                                continue
+                            else:
+                                logger.info("✅ 登录完成（页面已跳转）")
+
+                        await asyncio.sleep(3)
+                        return
+                    else:
+                        # 无登录表单 → 确认是否真有房源列表
+                        pList = await login_check_page.query_selector('ul.pList')
+                        if pList:
+                            logger.info("✅ 已登录，房源列表可见")
+                            return
+
+                        logger.warning(f"⚠️ 页面状态不明确（无登录表单无房源列表），{'2s 后重试' if attempt < MAX_RETRIES - 1 else '假定已登录继续'}")
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(2)
+                        else:
+                            logger.warning("⚠️ 多次检测均不明确，假定已登录继续")
+                            return
+
+                except Exception as e:
+                    logger.error(f"❌ 登录检测异常 (第{attempt+1}次): {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error("❌ 多次登录检测失败，假定已登录继续")
+                        return
         finally:
-            # 关闭登录检查页面
             await login_check_page.close()
             logger.info("✅ 登录检查页面已关闭")
     

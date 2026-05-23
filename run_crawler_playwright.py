@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 from scrapers.i5i5j_scraper_playwright import I5I5JScraperPlaywright
 from etl.db_manager import DatabaseManager
 from datetime import datetime
+import random
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,39 +57,66 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
         url = f"https://bj.5i5j.com/ershoufang/{region_code}/n{page_num}/"
 
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        html = await page.content()
+
+        # 弱验证：先检测再处理
+        try:
+            body_text = await page.inner_text('body')
+            if '点击页面或移动鼠标' in body_text:
+                logger.info(f"检测到验证页面 {region_name} P{page_num}，模拟点击...")
+                await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
+                await asyncio.sleep(0.3)
+                await page.mouse.click(random.randint(100, 500), random.randint(100, 400))
+                await page.wait_for_selector('ul.pList', timeout=15000)
+                logger.info(f"验证通过 {region_name} P{page_num}")
+        except Exception:
+            pass
 
         try:
             await page.wait_for_selector('ul.pList', timeout=5000)
         except Exception:
-            if await page.query_selector('.anti-crawl'):
+            pass
+
+        html = await page.content()
+
+        soup = BeautifulSoup(html, 'lxml')
+        house_list = soup.find('ul', {'class': 'pList'})
+        if not house_list:
+            if soup.select_one('.anti-crawl'):
                 logger.warning(f"反爬 {region_name} P{page_num}")
                 return True, 0, (time.perf_counter() - t0) * 1000
-            if await page.query_selector('.login-prompt'):
+            if soup.select_one('.login-prompt'):
                 logger.warning(f"需登录 {region_name} P{page_num}")
                 return True, 0, (time.perf_counter() - t0) * 1000
             for sel in ['.n_no_data', '.no-result', '.empty-tip']:
-                if await page.query_selector(sel):
+                if soup.select_one(sel):
                     return False, 0, (time.perf_counter() - t0) * 1000
             return True, 0, (time.perf_counter() - t0) * 1000
 
-        soup = BeautifulSoup(html, 'lxml')
+        result = None
         try:
             page_data = I5I5JScraperPlaywright.extract_information(soup)
+            if page_data:
+                for house in page_data:
+                    house['region'] = region_name
+                    try:
+                        shared_queue.put(house, block=True, timeout=10)
+                    except Exception:
+                        logger.warning(f"队列满 {house.get('house_id', 'unknown')}")
+                result = (True, len(page_data), (time.perf_counter() - t0) * 1000)
+            else:
+                result = (False, 0, (time.perf_counter() - t0) * 1000)
         except Exception as e:
             logger.error(f"提取失败 {region_name} P{page_num}: {e}")
-            return True, 0, (time.perf_counter() - t0) * 1000
-
-        if page_data:
-            for house in page_data:
-                house['region'] = region_name
-                try:
-                    shared_queue.put(house, block=True, timeout=10)
-                except Exception:
-                    logger.warning(f"队列满 {house.get('house_id', 'unknown')}")
-            return True, len(page_data), (time.perf_counter() - t0) * 1000
-        else:
-            return False, 0, (time.perf_counter() - t0) * 1000
+            result = (True, 0, (time.perf_counter() - t0) * 1000)
+        finally:
+            # 读完内容后 delay + 拟人鼠标操作
+            await asyncio.sleep(random.uniform(*SCRAPER_CONFIG['delay_range']))
+            try:
+                await page.mouse.move(random.randint(100, 800), random.randint(100, 600))
+                await page.mouse.wheel(0, random.randint(-200, 200))
+            except Exception:
+                pass
+        return result
     except Exception as e:
         logger.error(f"页面异常 {region_name} P{page_num}: {e}")
         return True, 0, (time.perf_counter() - t0) * 1000
@@ -100,15 +128,13 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
     worker_start_time = time.time()
     logger.info(f"🚀 Playwright 多标签页采集线程启动 (端口: {debug_port})，任务: {district_tasks}")
     
-    # 初始化爬虫并检查登录状态
-    scraper = I5I5JScraperPlaywright(debug_port=debug_port)
-    await scraper.connect()
-    
-    # 检查登录状态（在最前面检查）
+    # 登录预检：保持连接供第一个 batch 复用，避免断连重连导致 cookie 丢失
+    login_scraper = I5I5JScraperPlaywright(debug_port=debug_port)
+    await login_scraper.connect()
     logger.info("🔐 开始检查登录状态")
-    await scraper.check_and_login()
+    await login_scraper.check_and_login()
     logger.info("✅ 登录检查完成")
-    await scraper.close()
+    login_used = False
 
     try:
         for dist_code, dist_name in district_tasks.items():
@@ -123,8 +149,12 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
             while current_page <= max_page and not is_region_finished:
                 end_page = min(current_page + restart_interval - 1, max_page)
 
-                scraper = I5I5JScraperPlaywright(debug_port=debug_port)
-                await scraper.connect()
+                if not login_used:
+                    scraper = login_scraper
+                    login_used = True
+                else:
+                    scraper = I5I5JScraperPlaywright(debug_port=debug_port)
+                    await scraper.connect()
                 await scraper.create_pages(window_size)
 
                 page_queue = asyncio.Queue()

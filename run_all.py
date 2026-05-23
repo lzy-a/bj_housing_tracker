@@ -3,6 +3,8 @@
 一键全量爬取：二手房 → 租房 → 社区指标
 自动检测 Chrome CDP，未启动则自动拉起
 """
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -17,21 +19,97 @@ CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 def ensure_chrome():
-    """确保 Chrome CDP 已启动，没有则自动拉起"""
+    """确保 Chrome CDP 已启动，每次强制重启干净实例"""
+    # 先杀旧进程，并等待其真正退出
     try:
-        r = requests.get(f"http://localhost:{CHROME_PORT}/json/version", timeout=3)
-        r.raise_for_status()
-        ws = r.json().get("webSocketDebuggerUrl", "")
-        print(f"✅ Chrome CDP 已在运行: {ws[:60]}...")
-        return
+        subprocess.run(
+            ["pkill", "-f", f"remote-debugging-port={CHROME_PORT}"],
+            timeout=5
+        )
+        # 等待进程真正退出（最多等 5 秒），否则后续文件清理可能被覆盖
+        for _ in range(10):
+            result = subprocess.run(
+                ["pgrep", "-f", f"remote-debugging-port={CHROME_PORT}"],
+                capture_output=True, timeout=3
+            )
+            if result.returncode != 0:
+                break
+            time.sleep(0.5)
+        print("🔄 已关闭旧 Chrome 实例")
     except Exception:
-        print("⏳ Chrome CDP 未启动，正在拉起...")
+        pass
 
+    # 清理残留锁文件，避免 "Chrome 未正确关闭" 提示
+    for lock in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
+        lp = os.path.join(CHROME_USER_DIR, lock)
+        if os.path.exists(lp):
+            try:
+                os.remove(lp)
+            except OSError:
+                pass
+
+    # 清理会话恢复文件，防止上次异常退出的 tab 被恢复
+    default_dir = os.path.join(CHROME_USER_DIR, "Default")
+    for sf in ["Current Session", "Current Tabs", "Last Session", "Last Tabs"]:
+        fp = os.path.join(default_dir, sf)
+        if os.path.exists(fp):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+    # 也清理旧会话目录
+    sessions_dir = os.path.join(default_dir, "Sessions")
+    if os.path.exists(sessions_dir):
+        try:
+            shutil.rmtree(sessions_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    # 清理缓存目录，控制 profile 体积（保留 Cookies 不动）
+    for cd in ["Cache", "Code Cache", "GPUCache", "Service Worker",
+               "DawnCache", "ShaderCache", "GrShaderCache"]:
+        cp = os.path.join(default_dir, cd)
+        if os.path.exists(cp):
+            try:
+                shutil.rmtree(cp, ignore_errors=True)
+            except Exception:
+                pass
+
+    # 写入/创建 Preferences：抑制恢复提示 + 关闭会话恢复
+    os.makedirs(default_dir, exist_ok=True)
+    prefs_path = os.path.join(default_dir, "Preferences")
+    if os.path.exists(prefs_path):
+        try:
+            with open(prefs_path, "r") as f:
+                prefs = json.load(f)
+        except Exception:
+            prefs = {}
+    else:
+        prefs = {}
+    try:
+        prefs["profile"] = prefs.get("profile", {})
+        prefs["profile"]["exit_type"] = "Normal"
+        prefs["profile"]["exited_cleanly"] = True
+        # 启动时打开新标签页，不要恢复上次会话
+        prefs["session"] = prefs.get("session", {})
+        prefs["session"]["restore_on_startup"] = 0
+        with open(prefs_path, "w") as f:
+            json.dump(prefs, f, indent=2)
+    except Exception:
+        pass
+
+    print("⏳ 正在拉起 Chrome...")
     cmd = [
         CHROME_PATH,
         f"--remote-debugging-port={CHROME_PORT}",
         f"--user-data-dir={CHROME_USER_DIR}",
         "--blink-settings=imagesEnabled=false",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        "--disable-features=ChromeWhatsNewUI",
+        "--disk-cache-size=5242880",
     ]
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(3)

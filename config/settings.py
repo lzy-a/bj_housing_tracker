@@ -28,13 +28,15 @@ CHROME_DEBUG_PORT = int(os.getenv('CHROME_DEBUG_PORT', '9223'))
 
 # ---- 我爱我家登录 ----
 I5I5J_PHONE = os.getenv('I5I5J_PHONE', '13436960685')
+I5I5J_PHONE_2 = os.getenv('I5I5J_PHONE_2', '18501287718')
 I5I5J_PASSWORD = os.getenv('I5I5J_PASSWORD', 'mysj113598')
 
 # ---- 爬虫配置 ----
 SCRAPER_CONFIG = {
     'delay': 0.0,
+    'delay_range': [0.2, 0.4],
     'timeout': 30,
-    'window_size': 8,
+    'window_size': 5,
     'max_page': 2000,
     'restart_interval': 400,
     'batch_size': 500,
