@@ -36,6 +36,9 @@ metabase-data/
 data/
 *.csv
 
+# 分析报告（Obsidian vault，不上传）
+reports/
+
 # 分发
 dist/
 build/

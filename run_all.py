@@ -176,6 +176,7 @@ def main():
                         help="区域编号: 0=东城 1=西城 2=海淀 3=朝阳 4=丰台 5=石景山")
     parser.add_argument("--sale-only", action="store_true", help="只跑二手房")
     parser.add_argument("--rent-only", action="store_true", help="只跑租房")
+    parser.add_argument("--no-analyst", action="store_true", help="跳过 AI 分析师")
     args = parser.parse_args()
 
     region_args = []
@@ -209,6 +210,18 @@ def main():
             summaries.append(f"  {name_pad}: {elapsed:.0f}s | {count}条")
 
     shutdown_chrome()
+
+    # AI 分析师
+    if not args.no_analyst:
+        print(f"\n{'=' * 60}")
+        print(f"🤖 启动 AI 分析师...")
+        print(f"{'=' * 60}")
+        result = subprocess.run(
+            [sys.executable, "run_analyst.py"],
+            cwd=sys.path[0] or ".",
+        )
+        if result.returncode != 0:
+            print(f"⚠️ AI 分析师异常退出 (exit={result.returncode})，数据爬取正常")
 
     total_elapsed = time.time() - total_start
     print(f"\n{'=' * 60}")

@@ -42,6 +42,19 @@ SCRAPER_CONFIG = {
     'batch_size': 500,
 }
 
+# ---- Claude API（兼容 Anthropic 协议）----
+CLAUDE_API_KEY = os.getenv('MIMO_KEY', os.getenv('ANTHROPIC_API_KEY', ''))
+CLAUDE_BASE_URL = os.getenv('CLAUDE_BASE_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
+CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'mimo-v2.5-pro')
+
+# ---- 分析师配置 ----
+ANALYST_CONFIG = {
+    'daily_max_tokens': 8192,
+    'weekly_max_tokens': 16384,
+    'thinking_enabled': True,   # 免费 token plan，开到最大
+    'temperature': 1.0,
+}
+
 # ---- 日志 ----
 LOGGING = {
     'level': 'INFO',

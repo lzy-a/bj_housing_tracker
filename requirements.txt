@@ -30,3 +30,7 @@ python-dotenv
 
 # 工具
 Pillow
+
+# AI 分析
+anthropic
+tabulate
