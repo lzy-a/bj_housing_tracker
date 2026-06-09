@@ -20,31 +20,30 @@ ORDER BY region
 
 # A2: 各区环比变化（近3日均值 vs 7-9天前均值的 MA3 对比）
 DISTRICT_WOW_CHANGE = """
-WITH all_dates AS (
-    SELECT DISTINCT record_date
+WITH date_rank AS (
+    SELECT DISTINCT record_date,
+           DENSE_RANK() OVER (ORDER BY record_date DESC) AS dr
     FROM district_snapshots
     ORDER BY record_date DESC
     LIMIT 12
 ),
-ranked AS (
-    SELECT ds.record_date, ds.region, ds.total_listings, ds.median_unit_price,
-           ROW_NUMBER() OVER (ORDER BY ds.record_date DESC) AS rn
-    FROM district_snapshots ds
-    JOIN all_dates ad ON ds.record_date = ad.record_date
-),
 current_window AS (
-    SELECT region,
-           ROUND(AVG(median_unit_price)::numeric, 0) AS current_price_ma3,
-           ROUND(AVG(total_listings)::numeric, 0) AS current_listings_ma3
-    FROM ranked WHERE rn BETWEEN 1 AND 3
-    GROUP BY region
+    SELECT ds.region,
+           ROUND(AVG(ds.median_unit_price)::numeric, 0) AS current_price_ma3,
+           ROUND(AVG(ds.total_listings)::numeric, 0) AS current_listings_ma3
+    FROM district_snapshots ds
+    JOIN date_rank dr ON ds.record_date = dr.record_date
+    WHERE dr.dr BETWEEN 1 AND 3
+    GROUP BY ds.region
 ),
 week_ago_window AS (
-    SELECT region,
-           ROUND(AVG(median_unit_price)::numeric, 0) AS week_ago_price_ma3,
-           ROUND(AVG(total_listings)::numeric, 0) AS week_ago_listings_ma3
-    FROM ranked WHERE rn BETWEEN 8 AND 10
-    GROUP BY region
+    SELECT ds.region,
+           ROUND(AVG(ds.median_unit_price)::numeric, 0) AS week_ago_price_ma3,
+           ROUND(AVG(ds.total_listings)::numeric, 0) AS week_ago_listings_ma3
+    FROM district_snapshots ds
+    JOIN date_rank dr ON ds.record_date = dr.record_date
+    WHERE dr.dr BETWEEN 8 AND 10
+    GROUP BY ds.region
 )
 SELECT c.region, c.current_price_ma3, c.current_listings_ma3,
        w.week_ago_price_ma3, w.week_ago_listings_ma3,
@@ -374,27 +373,30 @@ ORDER BY region
 
 # G2: 租赁市场周环比
 RENTAL_WOW_CHANGE = """
-WITH all_dates AS (
-    SELECT DISTINCT record_date
+WITH date_rank AS (
+    SELECT DISTINCT record_date,
+           DENSE_RANK() OVER (ORDER BY record_date DESC) AS dr
     FROM district_rent_snapshots
     ORDER BY record_date DESC
     LIMIT 12
 ),
-ranked AS (
-    SELECT drs.record_date, drs.region, drs.total_rentals, drs.median_rent_price,
-           ROW_NUMBER() OVER (ORDER BY drs.record_date DESC) AS rn
-    FROM district_rent_snapshots drs
-    JOIN all_dates ad ON drs.record_date = ad.record_date
-),
 current_window AS (
-    SELECT region, ROUND(AVG(median_rent_price)::numeric, 0) AS current_rent_ma3,
-           ROUND(AVG(total_rentals)::numeric, 0) AS current_rentals_ma3
-    FROM ranked WHERE rn BETWEEN 1 AND 3 GROUP BY region
+    SELECT drs.region,
+           ROUND(AVG(drs.median_rent_price)::numeric, 0) AS current_rent_ma3,
+           ROUND(AVG(drs.total_rentals)::numeric, 0) AS current_rentals_ma3
+    FROM district_rent_snapshots drs
+    JOIN date_rank dr ON drs.record_date = dr.record_date
+    WHERE dr.dr BETWEEN 1 AND 3
+    GROUP BY drs.region
 ),
 week_ago_window AS (
-    SELECT region, ROUND(AVG(median_rent_price)::numeric, 0) AS week_ago_rent_ma3,
-           ROUND(AVG(total_rentals)::numeric, 0) AS week_ago_rentals_ma3
-    FROM ranked WHERE rn BETWEEN 8 AND 10 GROUP BY region
+    SELECT drs.region,
+           ROUND(AVG(drs.median_rent_price)::numeric, 0) AS week_ago_rent_ma3,
+           ROUND(AVG(drs.total_rentals)::numeric, 0) AS week_ago_rentals_ma3
+    FROM district_rent_snapshots drs
+    JOIN date_rank dr ON drs.record_date = dr.record_date
+    WHERE dr.dr BETWEEN 8 AND 10
+    GROUP BY drs.region
 )
 SELECT c.region, c.current_rent_ma3, c.current_rentals_ma3,
        w.week_ago_rent_ma3, w.week_ago_rentals_ma3,
