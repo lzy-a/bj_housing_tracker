@@ -34,3 +34,9 @@ Pillow
 # AI 分析
 anthropic
 tabulate
+
+# Finder 前端
+fastapi
+uvicorn
+jinja2
+python-multipart

@@ -44,7 +44,9 @@ def calc_district_rent_stats(rent_prices, areas):
 
 
 async def process_page(page, region_code, region_name, page_num, shared_queue):
-    """处理单个租房页面，返回 (success, listing_count, elapsed_ms)"""
+    """处理单个租房页面，返回 (outcome, listing_count, elapsed_ms)
+    outcome: 'success' | 'no_data' | 'suspicious'
+    """
     t0 = time.perf_counter()
     try:
         url = f"https://bj.5i5j.com/zufang/{region_code}/n{page_num}/"
@@ -52,20 +54,23 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(random.uniform(*SCRAPER_CONFIG['delay_range']))
 
-        # 弱验证：先检测再处理
+        # 点击认证处理：恢复成功 = 正常，恢复失败 = hard failure
         try:
             body_text = await page.inner_text('body')
             if '点击页面或移动鼠标' in body_text:
-                logger.info(f"[租房] 检测到验证页面 {region_name} P{page_num}，模拟点击...")
+                logger.info(f"[租房] 点击认证 {region_name} P{page_num}，尝试恢复...")
                 await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
                 await asyncio.sleep(0.3)
                 await page.mouse.click(random.randint(100, 500), random.randint(100, 400))
-                await page.wait_for_selector('ul.pList', timeout=15000)
-                logger.info(f"[租房] 验证通过 {region_name} P{page_num}")
+                try:
+                    await page.wait_for_selector('ul.pList', timeout=15000)
+                    logger.info(f"[租房] 认证恢复成功 {region_name} P{page_num}")
+                except Exception:
+                    logger.warning(f"[租房] 认证恢复失败 {region_name} P{page_num}")
+                    return 'suspicious', 0, (time.perf_counter() - t0) * 1000
         except Exception:
             pass
 
-        # 拟人操作：随机移动鼠标 + 轻微滚动
         try:
             await page.mouse.move(random.randint(100, 800), random.randint(100, 600))
             await page.mouse.wheel(0, random.randint(-200, 200))
@@ -78,16 +83,16 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
             pass
 
         html = await page.content()
-
         soup = BeautifulSoup(html, 'lxml')
         house_list = soup.find('ul', {'class': 'pList'})
+
         if not house_list:
             for sel in ['.n_no_data', '.no-result', '.empty-tip']:
                 if soup.select_one(sel):
-                    return False, 0, (time.perf_counter() - t0) * 1000
-            return True, 0, (time.perf_counter() - t0) * 1000
+                    return 'no_data', 0, (time.perf_counter() - t0) * 1000
+            logger.warning(f"[租房] 可疑页面 {region_name} P{page_num}: 无列表且非已知无数据")
+            return 'suspicious', 0, (time.perf_counter() - t0) * 1000
 
-        result = None
         try:
             page_data = I5I5JRentScraperPlaywright.extract_information(soup)
             if page_data:
@@ -97,24 +102,22 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
                         shared_queue.put(house, block=True, timeout=10)
                     except Exception:
                         logger.warning(f"队列满 [租房] {house.get('house_id')}")
-                result = (True, len(page_data), (time.perf_counter() - t0) * 1000)
+                return 'success', len(page_data), (time.perf_counter() - t0) * 1000
             else:
-                result = (False, 0, (time.perf_counter() - t0) * 1000)
+                return 'no_data', 0, (time.perf_counter() - t0) * 1000
         except Exception as e:
             logger.error(f"提取失败 [租房] {region_name} P{page_num}: {e}")
-            result = (True, 0, (time.perf_counter() - t0) * 1000)
+            return 'suspicious', 0, (time.perf_counter() - t0) * 1000
         finally:
-            # 读完内容后 delay + 拟人鼠标操作
             await asyncio.sleep(random.uniform(*SCRAPER_CONFIG['delay_range']))
             try:
                 await page.mouse.move(random.randint(100, 800), random.randint(100, 600))
                 await page.mouse.wheel(0, random.randint(-200, 200))
             except Exception:
                 pass
-        return result
     except Exception as e:
         logger.error(f"页面异常 [租房] {region_name} P{page_num}: {e}")
-        return True, 0, (time.perf_counter() - t0) * 1000
+        return 'suspicious', 0, (time.perf_counter() - t0) * 1000
 
 
 async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, window_size=3):
@@ -136,6 +139,7 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
             max_page = 2000
             restart_interval = SCRAPER_CONFIG['restart_interval']
             is_region_finished = False
+            region_suspicious = False
             total_listings = 0
 
             logger.info(f"🚀 [租房] {dist_name}: 开始扫描 (页={current_page}-{max_page})")
@@ -166,18 +170,21 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
 
                 async def task_worker(page):
                     nonlocal is_region_finished, total_listings, batch_no_data_count, current_page
-                    nonlocal pages_processed, last_progress_log, total_page_time
+                    nonlocal pages_processed, last_progress_log, total_page_time, region_suspicious
                     while not is_region_finished:
                         try:
                             page_num = await asyncio.wait_for(page_queue.get(), timeout=5)
-                            success, listings_count, page_ms = await process_page(page, dist_code, dist_name, page_num, shared_queue)
+                            outcome, listings_count, page_ms = await process_page(page, dist_code, dist_name, page_num, shared_queue)
                             total_listings += listings_count
                             pages_processed += 1
                             total_page_time += page_ms
                             current_page = max(current_page, page_num + 1)
                             page_queue.task_done()
 
-                            if not success:
+                            if outcome == 'suspicious':
+                                region_suspicious = True
+                                batch_no_data_count = 0
+                            elif outcome == 'no_data':
                                 batch_no_data_count += 1
                                 if batch_no_data_count >= max_no_data_pages:
                                     avg_s = total_page_time / pages_processed / 1000
@@ -190,7 +197,7 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
                                         except asyncio.QueueEmpty:
                                             break
                                     break
-                            else:
+                            else:  # success
                                 batch_no_data_count = 0
                                 if pages_processed - last_progress_log >= progress_interval:
                                     avg_s = total_page_time / pages_processed / 1000
@@ -198,12 +205,30 @@ async def run_multi_tab_worker_rent(debug_port, district_tasks, shared_queue, wi
                                     last_progress_log = pages_processed
                         except asyncio.TimeoutError:
                             break
+                        except Exception as e:
+                            region_suspicious = True
+                            logger.error(f"❌ [租房] {dist_name} P{page_num}: {e}")
+                            try:
+                                page_queue.task_done()
+                            except:
+                                pass
+                            continue
 
                 tasks = [task_worker(p) for p in scraper.pages]
                 await asyncio.gather(*tasks)
                 await scraper.close()
 
-            logger.info(f"📈 [租房] {dist_name} 完成: {total_listings} 条")
+            # 发送区域完成信号给消费者
+            region_ok = is_region_finished and not region_suspicious
+            reason = 'completed' if region_ok else ('suspicious_pages' if region_suspicious else 'failed_or_interrupted')
+            shared_queue.put({
+                '__control__': 'region_done',
+                'region': dist_name,
+                'ok': region_ok,
+                'reason': reason,
+                'listings': total_listings,
+            })
+            logger.info(f"{'✅' if region_ok else '⚠️'} [租房] {dist_name} 完成: {total_listings} 条, ok={region_ok} reason={reason}")
 
         logger.info(f"✅ [租房] 采集完成，总耗时 {time.time() - worker_start_time:.0f}s")
     except Exception as e:
@@ -219,6 +244,7 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
     processed_count = 0
 
     ledger = {}
+    region_outcomes = {}  # {region: {'ok': bool, 'reason': str}}
     batch_size = 500
     property_batch = []
     price_batch = []
@@ -288,6 +314,15 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             if item is None:
                 break
 
+            # 处理控制消息
+            if isinstance(item, dict) and item.get('__control__') == 'region_done':
+                region = item['region']
+                ok = item['ok']
+                reason = item.get('reason', 'unknown')
+                region_outcomes[region] = {'ok': ok, 'reason': reason}
+                logger.info(f"📬 [租房] 区域信号: {region} ok={ok} reason={reason}")
+                continue
+
             listing = item
             house_id = listing.get('house_id')
             if not house_id:
@@ -351,8 +386,13 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             except Exception as e:
                 logger.error(f"❌ [租房] 结算 {region} 失败: {e}")
 
-        # 标记消失的租房房源
+        # 标记消失的租房房源（仅限成功完成的区域）
         for region in regions:
+            outcome = region_outcomes.get(region)
+            if not outcome or not outcome['ok']:
+                reason = outcome.get('reason', 'no_signal') if outcome else 'no_signal'
+                logger.warning(f"⏭️  [租房] {region}: 跳过下架标记 (reason={reason})")
+                continue
             try:
                 conn = db_manager._get_connection()
                 cursor = conn.cursor()

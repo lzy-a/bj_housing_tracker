@@ -1,32 +1,25 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Multi-agent workflow
 
 This repository uses `.agents/` as the coordination layer between Codex and Claude Code.
 
-Before starting implementation work:
+Codex is the planner/reviewer and should use these files as the source of truth:
 
-1. Read `.agents/README.md`.
-2. Read `.agents/brief.md`.
-3. Read `.agents/invariants.md`.
-4. Read `.agents/test-protocol.md`.
-5. Read `.agents/claude-code-guidelines.md`.
-6. Read `.agents/git-workflow.md`.
-7. Pick only a task in `.agents/tasks/` whose status is `READY_FOR_CLAUDE` or a current task explicitly marked `NEEDS_REVISION`.
+- `.agents/README.md` — collaboration protocol and task state machine
+- `.agents/brief.md` — current project mission and priority
+- `.agents/invariants.md` — rules that protect data correctness
+- `.agents/test-protocol.md` — expected verification commands by task type
+- `.agents/plan.md` — current queue
+- `.agents/tasks/` — tasks for Claude Code
+- `.agents/reports/` — Claude Code implementation reports
+- `.agents/reviews/` — Codex review results
 
-Claude Code is the implementation agent. Codex owns planning, architecture review,
-and acceptance. Do not start `DRAFT`, `NEEDS_REVISION`, `ACCEPTED`, or `CANCELLED`
-tasks unless explicitly instructed.
-
-For each task:
-
-- change the task status to `IN_PROGRESS` when starting;
-- keep edits inside the task scope;
-- write `.agents/reports/<task-id>-result.md` when done;
-- update task status to `SUBMITTED_FOR_REVIEW`;
-- stop for Codex review before taking the next task.
+When asked to coordinate with Claude Code, prefer writing or updating task files
+instead of relying on chat memory. Review Claude Code results by reading the task,
+the result report, and the code diff, then write a review file.
 
 ## Project overview
 
@@ -102,11 +95,11 @@ reports/
 
 **两种模式**：
 - **日报**（每日触发）：7 条 SQL，~3500 input tokens，轻量 prompt，不更新知识库
-- **周刊**（周六自动触发）：13 条 SQL（含梯队指数/板块排名/供需趋势），~5000 input tokens，附带已有知识库上下文，Claude 回复末尾输出 `kb-update` JSON 块 → programmatic 更新区域档案和假设
+- **周刊**（周六自动触发）：13 条 SQL（含梯队指数/板块排名/供需趋势），~5000 input tokens，附带已有知识库上下文，Codex 回复末尾输出 `kb-update` JSON 块 → programmatic 更新区域档案和假设
 
 **复利机制**：
 1. 每次周报读取 `03-区域档案/*.md` + `04-假设追踪/*.md` 作为上下文注入 prompt
-2. Claude 基于新数据验证/推翻/修正之前的假设，追加新观察
+2. Codex 基于新数据验证/推翻/修正之前的假设，追加新观察
 3. 回复中的 `kb-update` JSON 被解析后自动写入对应 .md 文件
 4. 区域档案按日期追加，Obsidian 安装后可直接 `[[双向链接]]`
 

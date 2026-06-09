@@ -42,7 +42,12 @@ class AnalystAgent:
 
         response = self.client.messages.create(**kwargs)
 
-        text = response.content[0].text
+        # 取 TextBlock，跳过 ThinkingBlock
+        text = ''
+        for block in response.content:
+            if hasattr(block, 'text'):
+                text = block.text
+                break
         usage = response.usage
         logger.info(
             f"API 调用完成: input={usage.input_tokens}, output={usage.output_tokens}, "

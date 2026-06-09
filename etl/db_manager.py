@@ -210,8 +210,101 @@ class DatabaseManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_house_date ON price_history (house_id, record_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pd_comm_region_date ON property_details (community, region, first_seen_date, last_seen_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_date ON price_history (record_date)')
-        
 
+        # ========== Finder 模块表 ==========
+
+        # 8. 收藏小区
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS watchlist_communities (
+                id SERIAL PRIMARY KEY,
+                community_id VARCHAR(20),
+                community VARCHAR(100) NOT NULL,
+                region VARCHAR(50),
+                biz_circle VARCHAR(50),
+                is_active BOOLEAN DEFAULT TRUE,
+                filter_criteria JSONB DEFAULT '{}',
+                added_date DATE DEFAULT CURRENT_DATE,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(community)
+            )
+        ''')
+
+        # 9. 房源照片
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rental_photos (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) NOT NULL,
+                photo_url TEXT NOT NULL,
+                local_path TEXT,
+                room_type VARCHAR(30),
+                downloaded BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (house_id) REFERENCES rental_details(house_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_photos_house_id ON rental_photos(house_id)')
+
+        # 10. 多维度评分
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rental_scores (
+                id SERIAL PRIMARY KEY,
+                house_id VARCHAR(20) NOT NULL,
+                score_date DATE NOT NULL,
+                scores JSONB,
+                llm_summary TEXT,
+                scoring_model VARCHAR(50),
+                raw_input TEXT,
+                raw_output TEXT,
+                notified BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(house_id, score_date),
+                FOREIGN KEY (house_id) REFERENCES rental_details(house_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_scores_house_id ON rental_scores(house_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rental_scores_date ON rental_scores(score_date)')
+
+        # rental_details 新增列（详情页爬取标记）
+        cursor.execute('''
+            ALTER TABLE rental_details
+            ADD COLUMN IF NOT EXISTS detail_scraped BOOLEAN DEFAULT FALSE
+        ''')
+        # watchlist_communities 新增列（筛选条件）
+        cursor.execute('''
+            ALTER TABLE watchlist_communities
+            ADD COLUMN IF NOT EXISTS filter_criteria JSONB DEFAULT '{}'
+        ''')
+        cursor.execute('''
+            ALTER TABLE rental_details
+            ADD COLUMN IF NOT EXISTS detail_scraped_at TIMESTAMP
+        ''')
+        cursor.execute('''
+            ALTER TABLE rental_scores
+            ADD COLUMN IF NOT EXISTS raw_input TEXT
+        ''')
+        cursor.execute('''
+            ALTER TABLE rental_scores
+            ADD COLUMN IF NOT EXISTS raw_output TEXT
+        ''')
+
+        # 11. 小区通勤缓存
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS community_commute (
+                id SERIAL PRIMARY KEY,
+                community VARCHAR(100) NOT NULL,
+                community_id VARCHAR(20),
+                dest_name VARCHAR(100),
+                transit_minutes INTEGER,
+                transit_distance INTEGER,
+                walking_distance INTEGER,
+                lng FLOAT,
+                lat FLOAT,
+                calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(community, dest_name)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_community_commute_name ON community_commute(community)')
 
         conn.commit()
         cursor.close()
@@ -825,3 +918,548 @@ class DatabaseManager:
             cursor.close()
             self._return_connection(conn)
 
+    # ========== Finder 模块方法 ==========
+
+    # --- Watchlist ---
+
+    def get_watchlist(self, active_only=False):
+        """获取收藏小区列表"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            sql = "SELECT * FROM watchlist_communities"
+            if active_only:
+                sql += " WHERE is_active = TRUE"
+            sql += " ORDER BY added_date DESC"
+            cursor.execute(sql)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def add_to_watchlist(self, community, region=None, biz_circle=None, community_id=None,
+                         notes=None, filter_criteria=None):
+        """添加收藏小区"""
+        import json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            fc = json.dumps(filter_criteria or {}, ensure_ascii=False)
+            cursor.execute('''
+                INSERT INTO watchlist_communities (community, region, biz_circle, community_id, notes, filter_criteria)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (community) DO UPDATE
+                SET region = COALESCE(EXCLUDED.region, watchlist_communities.region),
+                    biz_circle = COALESCE(EXCLUDED.biz_circle, watchlist_communities.biz_circle),
+                    community_id = COALESCE(EXCLUDED.community_id, watchlist_communities.community_id),
+                    notes = COALESCE(EXCLUDED.notes, watchlist_communities.notes),
+                    filter_criteria = EXCLUDED.filter_criteria
+            ''', (community, region, biz_circle, community_id, notes, fc))
+            conn.commit()
+            logger.info(f"收藏小区: {community}")
+        except Exception as e:
+            logger.error(f"添加收藏失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def update_watchlist(self, watchlist_id, **kwargs):
+        """更新收藏小区（is_active, notes 等）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            sets = []
+            vals = []
+            for k, v in kwargs.items():
+                if k in ('is_active', 'notes', 'community', 'region', 'biz_circle'):
+                    sets.append(f"{k} = %s")
+                    vals.append(v)
+            if not sets:
+                return
+            vals.append(watchlist_id)
+            cursor.execute(
+                f"UPDATE watchlist_communities SET {', '.join(sets)} WHERE id = %s",
+                vals
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"更新收藏失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def remove_from_watchlist(self, watchlist_id):
+        """删除收藏小区"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM watchlist_communities WHERE id = %s", (watchlist_id,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"删除收藏失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    # --- Photos ---
+
+    def insert_rental_photos(self, house_id, photos):
+        """批量插入房源照片
+        photos: list of dict with keys: photo_url, room_type
+        """
+        if not photos:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM rental_photos WHERE house_id = %s", (house_id,))
+            for p in photos:
+                cursor.execute('''
+                    INSERT INTO rental_photos (house_id, photo_url, room_type)
+                    VALUES (%s, %s, %s)
+                ''', (house_id, p['photo_url'], p.get('room_type', 'other')))
+            conn.commit()
+            logger.info(f"插入 {len(photos)} 张照片: house_id={house_id}")
+        except Exception as e:
+            logger.error(f"插入照片失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def update_photo_local_path(self, photo_id, local_path):
+        """更新照片的本地路径"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE rental_photos SET local_path = %s, downloaded = TRUE WHERE id = %s",
+                (local_path, photo_id)
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"更新照片路径失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_photos_for_house(self, house_id):
+        """获取房源的所有照片"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute(
+                "SELECT * FROM rental_photos WHERE house_id = %s ORDER BY id",
+                (house_id,)
+            )
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    # --- Scores ---
+
+    def insert_rental_score(self, house_id, scores, llm_summary='', scoring_model='',
+                            raw_input='', raw_output=''):
+        """插入评分结果"""
+        import json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            from datetime import date
+            cursor.execute('''
+                INSERT INTO rental_scores (house_id, score_date, scores, llm_summary, scoring_model, raw_input, raw_output)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (house_id, score_date) DO UPDATE
+                SET scores = EXCLUDED.scores,
+                    llm_summary = EXCLUDED.llm_summary,
+                    scoring_model = EXCLUDED.scoring_model,
+                    raw_input = EXCLUDED.raw_input,
+                    raw_output = EXCLUDED.raw_output
+            ''', (house_id, date.today(), json.dumps(scores, ensure_ascii=False),
+                  llm_summary, scoring_model, raw_input, raw_output))
+            conn.commit()
+            logger.info(f"插入评分: house_id={house_id}")
+        except Exception as e:
+            logger.error(f"插入评分失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_listings_with_scores(self, min_score=None, max_price=None, min_area=None,
+                                  max_area=None, region=None, community=None,
+                                  rent_type=None, layout=None,
+                                  sort_by='community_count', sort_dir='DESC',
+                                  page=1, page_size=20):
+        """带筛选/排序/分页的房源+评分查询（按社区分页，不断裂）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            # 基础查询（不含 LIMIT/OFFSET）
+            base_sql = """
+                WITH latest_scores AS (
+                    SELECT DISTINCT ON (house_id)
+                        house_id, score_date, scores, llm_summary, notified
+                    FROM rental_scores
+                    ORDER BY house_id, score_date DESC
+                )
+                SELECT
+                    r.house_id, r.title, r.region, r.biz_circle, r.community,
+                    r.layout, r.area, r.rent_price, r.rent_type, r.orientation,
+                    r.decoration, r.floor_info, r.community_id, r.first_seen_date,
+                    s.score_date, s.scores, s.llm_summary, s.notified,
+                    cm.transit_minutes, w.id as watchlist_id,
+                    COUNT(*) OVER (PARTITION BY r.community) as community_count
+                FROM rental_details r
+                JOIN latest_scores s ON r.house_id = s.house_id
+                LEFT JOIN community_commute cm ON cm.community = r.community AND cm.dest_name = '太平桥站'
+                JOIN watchlist_communities w ON w.community = r.community AND w.is_active = TRUE
+                WHERE r.status = 1
+            """
+            params = []
+
+            if min_score is not None:
+                base_sql += " AND (s.scores->>'推荐指数')::int >= %s"
+                params.append(min_score)
+            if max_price is not None:
+                base_sql += " AND r.rent_price <= %s"
+                params.append(max_price)
+            if min_area is not None:
+                base_sql += " AND r.area >= %s"
+                params.append(min_area)
+            if max_area is not None:
+                base_sql += " AND r.area <= %s"
+                params.append(max_area)
+            if region:
+                base_sql += " AND r.region = %s"
+                params.append(region)
+            if community:
+                base_sql += " AND r.community = %s"
+                params.append(community)
+            if rent_type:
+                base_sql += " AND r.rent_type = %s"
+                params.append(rent_type)
+            if layout:
+                base_sql += " AND r.layout LIKE %s"
+                params.append(f'{layout}%')
+
+            # 获取匹配的社区列表（按房源数排序）
+            comm_sql = f"SELECT community, COUNT(*) as cnt FROM ({base_sql}) sub GROUP BY community"
+            allowed_sorts = {
+                'score_date': 'MAX(sub.score_date)',
+                'rent_price': 'MIN(sub.rent_price)',
+                'area': 'MAX(sub.area)',
+                'community_count': 'COUNT(*)',
+            }
+            sort_col = allowed_sorts.get(sort_by, 'COUNT(*)')
+            sort_dir_sql = 'ASC' if sort_dir == 'ASC' else 'DESC'
+            comm_sql += f" ORDER BY {sort_col} {sort_dir_sql}"
+
+            cursor.execute(comm_sql, params)
+            all_communities = cursor.fetchall()
+            total_communities = len(all_communities)
+
+            # 按社区分页（每页 5 个社区）
+            communities_per_page = 5
+            start = (page - 1) * communities_per_page
+            end = start + communities_per_page
+            page_communities = [c['community'] for c in all_communities[start:end]]
+
+            if not page_communities:
+                return {'listings': [], 'total': 0, 'page': page, 'page_size': 0,
+                        'total_communities': 0, 'communities_per_page': communities_per_page}
+
+            # 获取这些社区的所有房源（保持社区排序顺序）
+            placeholders = ','.join(['%s'] * len(page_communities))
+            order_cases = ' '.join(f"WHEN r.community = %s THEN {i}" for i in range(len(page_communities)))
+            listings_sql = f"{base_sql} AND r.community IN ({placeholders}) ORDER BY CASE {order_cases} END, r.rent_price"
+            params_with_order = params + page_communities + page_communities  # 一份用于 IN，一份用于 CASE
+            cursor.execute(listings_sql, params_with_order)
+            rows = cursor.fetchall()
+
+            return {'listings': rows, 'total': len(rows), 'page': page,
+                    'page_size': len(rows), 'total_communities': total_communities,
+                    'communities_per_page': communities_per_page,
+                    'page_communities': page_communities}
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_listing_detail(self, house_id):
+        """获取单个房源的完整信息（含照片和评分）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT * FROM rental_details WHERE house_id = %s", (house_id,))
+            listing = cursor.fetchone()
+            if not listing:
+                return None
+
+            cursor.execute(
+                "SELECT * FROM rental_photos WHERE house_id = %s ORDER BY id",
+                (house_id,)
+            )
+            photos = cursor.fetchall()
+
+            cursor.execute('''
+                SELECT * FROM rental_scores WHERE house_id = %s
+                ORDER BY score_date DESC LIMIT 1
+            ''', (house_id,))
+            score = cursor.fetchone()
+
+            result = dict(listing)
+            result['photos'] = photos
+            result['score'] = score
+            return result
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_unscored_in_watchlist(self):
+        """获取收藏小区中未评分的活跃房源（应用筛选条件）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute('''
+                SELECT r.house_id, r.title, r.region, r.biz_circle, r.community,
+                       r.layout, r.area, r.rent_price, r.rent_type, r.orientation,
+                       r.decoration, r.floor_info, r.community_id
+                FROM rental_details r
+                JOIN watchlist_communities w ON r.community = w.community
+                WHERE w.is_active = TRUE
+                  AND r.status = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM rental_scores s
+                      WHERE s.house_id = r.house_id AND s.score_date = CURRENT_DATE
+                  )
+                  AND (w.filter_criteria->>'rent_type' IS NULL
+                       OR w.filter_criteria->>'rent_type' = ''
+                       OR r.rent_type = w.filter_criteria->>'rent_type')
+                  AND (w.filter_criteria->>'layout' IS NULL
+                       OR w.filter_criteria->>'layout' = ''
+                       OR r.layout LIKE w.filter_criteria->>'layout' || '%')
+                  AND (w.filter_criteria->>'max_price' IS NULL
+                       OR w.filter_criteria->>'max_price' = ''
+                       OR r.rent_price <= (w.filter_criteria->>'max_price')::float)
+                ORDER BY r.first_seen_date DESC
+            ''')
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def mark_detail_scraped(self, house_id):
+        """标记房源详情页已爬取"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE rental_details
+                SET detail_scraped = TRUE, detail_scraped_at = CURRENT_TIMESTAMP
+                WHERE house_id = %s
+            ''', (house_id,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"标记详情页已爬取失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_unnotified_high_scores(self):
+        """获取未通知的高分房源"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute('''
+                SELECT s.house_id, s.score_date, s.scores, s.llm_summary,
+                       r.title, r.region, r.biz_circle, r.community,
+                       r.layout, r.area, r.rent_price, r.rent_type
+                FROM rental_scores s
+                JOIN rental_details r ON s.house_id = r.house_id
+                WHERE s.notified = FALSE
+                  AND s.score_date = CURRENT_DATE
+                ORDER BY s.score_date DESC
+            ''')
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def mark_notified(self, house_ids):
+        """标记房源已通知"""
+        if not house_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE rental_scores SET notified = TRUE
+                WHERE house_id = ANY(%s) AND score_date = CURRENT_DATE
+            ''', (house_ids,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"标记已通知失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def search_communities(self, keyword, limit=20):
+        """搜索小区名（自动补全用）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute('''
+                SELECT DISTINCT community, region, biz_circle, community_id
+                FROM rental_details
+                WHERE community ILIKE %s AND status = 1
+                ORDER BY community
+                LIMIT %s
+            ''', (f'%{keyword}%', limit))
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_market_data(self, community: str, layout_prefix: str = None) -> dict:
+        """获取小区同户型的单位面积租金均价，供评分参考。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT AVG(rent_price / area), AVG(rent_price), AVG(area), COUNT(*)
+                FROM rental_details
+                WHERE community = %s AND status = 1
+                  AND rent_price > 0 AND area > 0
+            """
+            params = [community]
+            if layout_prefix:
+                sql += " AND layout LIKE %s"
+                params.append(f'{layout_prefix}%')
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            if row and row[0]:
+                return {
+                    'avg_unit_price': round(float(row[0]), 1),  # 元/㎡
+                    'avg_price': round(float(row[1]), 0),
+                    'avg_area': round(float(row[2]), 1),
+                    'count': row[3],
+                }
+            return {}
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    # --- Commute ---
+
+    def get_commute(self, community: str, dest_name: str = '太平桥站') -> dict:
+        """获取小区通勤数据（缓存）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            cursor.execute('''
+                SELECT * FROM community_commute
+                WHERE community = %s AND dest_name = %s
+            ''', (community, dest_name))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def save_commute(self, community: str, community_id: str, dest_name: str,
+                     transit_minutes: int, transit_distance: int, walking_distance: int,
+                     lng: float, lat: float):
+        """保存通勤数据"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO community_commute
+                (community, community_id, dest_name, transit_minutes, transit_distance,
+                 walking_distance, lng, lat)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (community, dest_name) DO UPDATE
+                SET transit_minutes = EXCLUDED.transit_minutes,
+                    transit_distance = EXCLUDED.transit_distance,
+                    walking_distance = EXCLUDED.walking_distance,
+                    lng = EXCLUDED.lng, lat = EXCLUDED.lat,
+                    calculated_at = CURRENT_TIMESTAMP
+            ''', (community, community_id, dest_name, transit_minutes,
+                  transit_distance, walking_distance, lng, lat))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"保存通勤数据失败: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_uncached_communities(self, dest_name: str = '太平桥站',
+                                 max_price: float = None, layout_prefix: str = None) -> list:
+        """获取没有通勤缓存的小区列表（只算有符合条件房源的小区）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            sql = '''
+                SELECT DISTINCT r.community, r.community_id, r.region, r.biz_circle
+                FROM rental_details r
+                WHERE r.status = 1 AND r.community IS NOT NULL AND r.community != ''
+                AND NOT EXISTS (
+                    SELECT 1 FROM community_commute c
+                    WHERE c.community = r.community AND c.dest_name = %s
+                )
+            '''
+            params = [dest_name]
+            if max_price:
+                sql += ' AND r.rent_price <= %s'
+                params.append(max_price)
+            if layout_prefix:
+                sql += ' AND r.layout LIKE %s'
+                params.append(f'{layout_prefix}%')
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def get_all_commutes(self, dest_name: str = '太平桥站', max_minutes: int = 60,
+                         min_price: float = None, max_price: float = None,
+                         layout_prefix: str = None, min_count: int = None) -> list:
+        """获取所有通勤数据（用于发现功能）"""
+        conn = self._get_connection()
+        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+        try:
+            sql = '''
+                SELECT c.*, COUNT(DISTINCT r.house_id) as listing_count,
+                       MIN(r.rent_price) as min_rent, AVG(r.rent_price) as avg_rent
+                FROM community_commute c
+                JOIN rental_details r ON r.community = c.community AND r.status = 1
+                WHERE c.dest_name = %s AND c.transit_minutes <= %s
+            '''
+            params = [dest_name, max_minutes]
+            if min_price:
+                sql += ' AND r.rent_price >= %s'
+                params.append(min_price)
+            if max_price:
+                sql += ' AND r.rent_price <= %s'
+                params.append(max_price)
+            if layout_prefix:
+                sql += ' AND r.layout LIKE %s'
+                params.append(f'{layout_prefix}%')
+            sql += ' GROUP BY c.id'
+            if min_count:
+                sql += ' HAVING COUNT(DISTINCT r.house_id) >= %s'
+                params.append(min_count)
+            sql += ' ORDER BY c.transit_minutes'
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            self._return_connection(conn)

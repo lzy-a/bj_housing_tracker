@@ -42,10 +42,17 @@ SCRAPER_CONFIG = {
     'batch_size': 500,
 }
 
-# ---- Claude API（兼容 Anthropic 协议）----
-CLAUDE_API_KEY = os.getenv('MIMO_KEY', os.getenv('ANTHROPIC_API_KEY', ''))
-CLAUDE_BASE_URL = os.getenv('CLAUDE_BASE_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
-CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'mimo-v2.5-pro')
+# ---- LLM API（共用 Key 和端点，模型各自配置）----
+LLM_API_KEY = os.getenv('LLM_API_KEY', os.getenv('MIMO_KEY', os.getenv('ANTHROPIC_API_KEY', '')))
+LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
+
+# 分析师模型
+CLAUDE_API_KEY = LLM_API_KEY
+CLAUDE_BASE_URL = LLM_BASE_URL
+CLAUDE_MODEL = os.getenv('ANALYST_MODEL', os.getenv('CLAUDE_MODEL', 'mimo-v2.5-pro'))
+
+# 找房器模型
+FINDER_MODEL = os.getenv('FINDER_MODEL', 'mimo-v2.5-pro')
 
 # ---- 分析师配置 ----
 ANALYST_CONFIG = {
@@ -54,6 +61,29 @@ ANALYST_CONFIG = {
     'thinking_enabled': True,   # 免费 token plan，开到最大
     'temperature': 1.0,
 }
+
+# ---- Finder (租房找房器) ----
+FINDER_CONFIG = {
+    'concurrency': 5,
+    'scrape_delay_range': [0.3, 0.8],
+    'alert_score_threshold': 7,
+    'max_images_per_listing': 10,
+}
+
+FINDER_API_KEY = os.getenv('FINDER_API_KEY', LLM_API_KEY)
+FINDER_BASE_URL = os.getenv('FINDER_BASE_URL', LLM_BASE_URL)
+
+# 视觉模型（支持多模态图片输入，留空则用 FINDER_MODEL）
+FINDER_VISION_API_KEY = os.getenv('FINDER_VISION_API_KEY', '')
+FINDER_VISION_BASE_URL = os.getenv('FINDER_VISION_BASE_URL', '')
+FINDER_VISION_MODEL = os.getenv('FINDER_VISION_MODEL', '')
+
+# ---- Email (Gmail SMTP) ----
+GMAIL_SMTP_SERVER = os.getenv('GMAIL_SMTP_SERVER', 'smtp.gmail.com')
+GMAIL_SMTP_PORT = int(os.getenv('GMAIL_SMTP_PORT', '587'))
+GMAIL_SENDER = os.getenv('GMAIL_SENDER', '')
+GMAIL_PASSWORD = os.getenv('GMAIL_PASSWORD', '')
+GMAIL_RECIPIENT = os.getenv('GMAIL_RECIPIENT', '')
 
 # ---- 日志 ----
 LOGGING = {

@@ -177,6 +177,7 @@ def main():
     parser.add_argument("--sale-only", action="store_true", help="只跑二手房")
     parser.add_argument("--rent-only", action="store_true", help="只跑租房")
     parser.add_argument("--no-analyst", action="store_true", help="跳过 AI 分析师")
+    parser.add_argument("--finder", action="store_true", help="运行租房找房器（详情页爬取+评分）")
     args = parser.parse_args()
 
     region_args = []
@@ -222,6 +223,18 @@ def main():
         )
         if result.returncode != 0:
             print(f"⚠️ AI 分析师异常退出 (exit={result.returncode})，数据爬取正常")
+
+    # 租房找房器
+    if args.finder:
+        print(f"\n{'=' * 60}")
+        print(f"🔍 启动租房找房器...")
+        print(f"{'=' * 60}")
+        result = subprocess.run(
+            [sys.executable, "finder/run_finder.py"],
+            cwd=sys.path[0] or ".",
+        )
+        if result.returncode != 0:
+            print(f"⚠️ 租房找房器异常退出 (exit={result.returncode})")
 
     total_elapsed = time.time() - total_start
     print(f"\n{'=' * 60}")

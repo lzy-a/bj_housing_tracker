@@ -44,5 +44,9 @@ dist/
 build/
 *.egg-info/
 
+# 调试文件
+debug_*.py
+debug_*.html
+
 # Claude 内部
 .claude/
