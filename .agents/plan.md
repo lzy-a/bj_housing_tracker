@@ -9,7 +9,7 @@
 | 003 | Make price-change view explicit | ACCEPTED | Claude Code | Avoid silent missing data |
 | 004 | Deduplicate same-day history rows | DRAFT | Codex | Depends on desired same-day semantics |
 | 005 | Normalize DB connection pool handling | DRAFT | Codex | Lower urgency unless pool errors recur |
-| 006 | Upgrade analyst Obsidian memory protocol | READY_FOR_CLAUDE | Claude Code | Start after 001 is accepted |
+| 006 | Upgrade analyst Obsidian memory protocol | ACCEPTED | Codex | Memory 1.0 implemented |
 | 007 | Restore pending listings on failed crawl | ACCEPTED | Claude Code | Complete crawler status lifecycle |
 
 ## Review Policy

@@ -3,6 +3,10 @@
 """
 
 import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import pandas as pd
 from etl.db_manager import DatabaseManager
 from analyst.sql_queries import (
     DISTRICT_LATEST_SNAPSHOT, DISTRICT_WOW_CHANGE,
@@ -18,13 +22,33 @@ from analyst.sql_queries import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class QueryResult:
+    """SQL 提取结果，区分真实空数据和查询失败。"""
+    name: str
+    data: pd.DataFrame
+    status: str = "ok"  # ok | empty | error
+    error: Optional[str] = None
+
+    @property
+    def empty(self):
+        return self.data.empty
+
+
 def _safe_query(db, query, fallback_name="query"):
-    """执行查询，失败时返回空 DataFrame 并记录警告。"""
+    """执行查询，返回带状态的 QueryResult。"""
     try:
-        return db.execute_query(query)
+        df = db.execute_query(query, strict=True)
+        status = "empty" if df.empty else "ok"
+        return QueryResult(name=fallback_name, data=df, status=status)
     except Exception as e:
         logger.warning(f"查询 {fallback_name} 失败: {e}")
-        return None
+        return QueryResult(
+            name=fallback_name,
+            data=pd.DataFrame(),
+            status="error",
+            error=str(e),
+        )
 
 
 class DataExtractor:

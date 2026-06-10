@@ -1,6 +1,6 @@
 # Task 006: Upgrade Analyst Obsidian Memory Protocol
 
-status: READY_FOR_CLAUDE
+status: ACCEPTED
 owner: Claude Code
 created: 2026-06-09
 priority: P2
