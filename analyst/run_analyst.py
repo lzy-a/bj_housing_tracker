@@ -99,10 +99,128 @@ def _build_knowledge_context() -> str:
     return "\n".join(parts)
 
 
+DISTRICTS = ["东城区", "西城区", "海淀区", "朝阳区", "丰台区", "石景山区"]
+VALID_CONFIDENCE = {"low", "medium", "high"}
+VALID_FAVORABILITY = {"buyers_market", "neutral", "sellers_market"}
+VALID_ACTION = {"观望", "开始看", "可以出手"}
+VALID_HYPOTHESIS_STATUS = {"strengthened", "weakened", "confirmed", "refuted", "paused", "active", "updated"}
+
+
+def _validate_observation(obs) -> list[str]:
+    """验证单条观察，返回错误列表。空字符串/None 视为无观察，合法。"""
+    errors = []
+    if obs is None or (isinstance(obs, str) and not obs.strip()):
+        return errors  # 无观察，合法
+    if isinstance(obs, str):
+        return errors  # 非空字符串，合法
+    if not isinstance(obs, dict):
+        errors.append(f"观察类型无效: {type(obs).__name__}")
+        return errors
+    # dict 观察必须有 claim、evidence、source、confidence
+    if not obs.get("claim"):
+        errors.append("缺少 claim 字段")
+    if not obs.get("evidence"):
+        errors.append("缺少 evidence 字段")
+    if not obs.get("source"):
+        errors.append("缺少 source 字段")
+    conf = obs.get("confidence", "")
+    if not conf:
+        errors.append("缺少 confidence 字段")
+    elif conf not in VALID_CONFIDENCE:
+        errors.append(f"confidence 值无效: {conf}，应为 {VALID_CONFIDENCE}")
+    return errors
+
+
+def validate_kb_update(data: dict) -> tuple[bool, list[str]]:
+    """验证 kb-update JSON 结构，返回 (is_valid, errors)。"""
+    errors = []
+
+    if not isinstance(data, dict):
+        return False, ["kb-update 不是字典类型"]
+
+    # 必需顶层字段
+    required_keys = ["district_observations"]
+    for key in required_keys:
+        if key not in data:
+            errors.append(f"缺少必需字段: {key}")
+
+    # district_observations
+    obs = data.get("district_observations")
+    if obs is not None:
+        if not isinstance(obs, dict):
+            errors.append("district_observations 不是字典类型")
+        else:
+            for district in DISTRICTS:
+                if district not in obs:
+                    errors.append(f"district_observations 缺少区域: {district}")
+                elif obs[district]:  # 非空才验证内容
+                    errs = _validate_observation(obs[district])
+                    errors.extend(f"[{district}] {e}" for e in errs)
+
+    # biz_circle_observations（可选）
+    biz = data.get("biz_circle_observations")
+    if biz is not None:
+        if not isinstance(biz, dict):
+            errors.append("biz_circle_observations 不是字典类型")
+        else:
+            for name, obs in biz.items():
+                if obs:  # 非空才验证
+                    errs = _validate_observation(obs)
+                    errors.extend(f"[板块:{name}] {e}" for e in errs)
+
+    # hypothesis_updates（可选，但项必须是 dict）
+    updates = data.get("hypothesis_updates")
+    if updates is not None:
+        if not isinstance(updates, list):
+            errors.append("hypothesis_updates 不是列表")
+        else:
+            for i, h in enumerate(updates):
+                if not isinstance(h, dict):
+                    errors.append(f"假设更新[{i}] 类型无效: 必须是 dict，不能是 {type(h).__name__}")
+                else:
+                    status = h.get("status", "")
+                    if status and status not in VALID_HYPOTHESIS_STATUS:
+                        errors.append(f"假设更新[{i}] status 无效: {status}")
+
+    # new_hypotheses（可选，但项必须是 dict）
+    hyps = data.get("new_hypotheses")
+    if hyps is not None:
+        if not isinstance(hyps, list):
+            errors.append("new_hypotheses 不是列表")
+        else:
+            for i, h in enumerate(hyps):
+                if not isinstance(h, dict):
+                    errors.append(f"新假设[{i}] 类型无效: 必须是 dict，不能是 {type(h).__name__}")
+                else:
+                    conf = h.get("confidence", "")
+                    if conf and conf not in VALID_CONFIDENCE:
+                        errors.append(f"新假设[{i}] confidence 无效: {conf}")
+
+    # buyer_decision_update
+    ba = data.get("buyer_decision_update") or data.get("buying_assessment")
+    if ba and isinstance(ba, dict):
+        fav = ba.get("overall_favorability", "")
+        if fav and fav not in VALID_FAVORABILITY:
+            errors.append(f"overall_favorability 无效: {fav}")
+        action = ba.get("recommended_action", "")
+        if action and action not in VALID_ACTION:
+            errors.append(f"recommended_action 无效: {action}")
+
+    return len(errors) == 0, errors
+
+
 def _update_kb_from_response(kb_update: dict):
     """将 Claude 回复中的 kb-update JSON 写入知识库文件。"""
     if not kb_update:
         logger.info("kb-update 为空，跳过知识库更新")
+        return
+
+    # 验证
+    is_valid, errors = validate_kb_update(kb_update)
+    if not is_valid:
+        for err in errors:
+            logger.warning(f"kb-update 验证失败: {err}")
+        logger.warning("跳过知识库更新，请检查 LLM 输出格式")
         return
 
     # 区域观察
