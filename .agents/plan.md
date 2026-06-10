@@ -4,12 +4,13 @@
 
 | ID | Task | Status | Owner | Notes |
 |---|---|---|---|---|
-| 001 | Crawler delist guard | READY_FOR_CLAUDE | Claude Code | Highest priority data-safety fix |
-| 002 | Fix WoW date ranking SQL | READY_FOR_CLAUDE | Claude Code | Analyst correctness |
-| 003 | Make price-change view explicit | READY_FOR_CLAUDE | Claude Code | Avoid silent missing data |
+| 001 | Crawler delist guard | ACCEPTED | Claude Code | Highest priority data-safety fix |
+| 002 | Fix WoW date ranking SQL | ACCEPTED | Claude Code | Analyst correctness |
+| 003 | Make price-change view explicit | ACCEPTED | Claude Code | Avoid silent missing data |
 | 004 | Deduplicate same-day history rows | DRAFT | Codex | Depends on desired same-day semantics |
 | 005 | Normalize DB connection pool handling | DRAFT | Codex | Lower urgency unless pool errors recur |
 | 006 | Upgrade analyst Obsidian memory protocol | READY_FOR_CLAUDE | Claude Code | Start after 001 is accepted |
+| 007 | Restore pending listings on failed crawl | ACCEPTED | Claude Code | Complete crawler status lifecycle |
 
 ## Review Policy
 

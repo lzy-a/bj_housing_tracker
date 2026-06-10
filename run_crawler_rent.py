@@ -386,22 +386,27 @@ def global_db_consumer_rent(queue, stop_event, db_config, regions):
             except Exception as e:
                 logger.error(f"❌ [租房] 结算 {region} 失败: {e}")
 
-        # 标记消失的租房房源（仅限成功完成的区域）
+        # 区域结算：成功→下架，失败/无信号→恢复待确认
         for region in regions:
             outcome = region_outcomes.get(region)
-            if not outcome or not outcome['ok']:
+            if outcome and outcome['ok']:
+                try:
+                    conn = db_manager._get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('UPDATE rental_details SET status = 0 WHERE region = %s AND status = 2', (region,))
+                    conn.commit()
+                    cursor.close()
+                    db_manager._return_connection(conn)
+                    logger.info(f"✅ [租房] {region}: 下架标记完成")
+                except Exception as e:
+                    logger.error(f"❌ [租房] {region}: 下架标记失败: {e}")
+            else:
                 reason = outcome.get('reason', 'no_signal') if outcome else 'no_signal'
-                logger.warning(f"⏭️  [租房] {region}: 跳过下架标记 (reason={reason})")
-                continue
-            try:
-                conn = db_manager._get_connection()
-                cursor = conn.cursor()
-                cursor.execute('UPDATE rental_details SET status = 0 WHERE region = %s AND status = 2', (region,))
-                conn.commit()
-                cursor.close()
-                db_manager._return_connection(conn)
-            except Exception as e:
-                logger.error(f"❌ [租房] 标记 {region} 消失房源失败: {e}")
+                try:
+                    db_manager.restore_pending_rentals(region=region)
+                    logger.info(f"↩️  [租房] {region}: 恢复待确认房源 (reason={reason})")
+                except Exception as e:
+                    logger.error(f"❌ [租房] {region}: 恢复待确认失败: {e}")
 
     total_time = time.time() - start_time
     avg_ms = total_time / processed_count * 1000 if processed_count > 0 else 0

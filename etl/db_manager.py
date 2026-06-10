@@ -480,8 +480,8 @@ class DatabaseManager:
         try:
             # 将状态为2（待确认）的房源标记为0（下架）
             cursor.execute('''
-                UPDATE property_details 
-                SET status = 0 
+                UPDATE property_details
+                SET status = 0
                 WHERE region = %s AND status = 2
             ''', (region,))
             affected = cursor.rowcount
@@ -489,6 +489,44 @@ class DatabaseManager:
             logger.info(f"成功标记 {affected} 个消失的房源为下架状态")
         except Exception as e:
             logger.error(f"标记消失房源失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def restore_pending_properties(self, region: str):
+        """爬取不可信时，将待确认房源恢复为在租状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE property_details
+                SET status = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE region = %s AND status = 2
+            ''', (region,))
+            affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"恢复 {affected} 个待确认房源为在租状态 (region={region})")
+        except Exception as e:
+            logger.error(f"恢复待确认房源失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def restore_pending_rentals(self, region: str):
+        """爬取不可信时，将待确认租房房源恢复为在租状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE rental_details
+                SET status = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE region = %s AND status = 2
+            ''', (region,))
+            affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"恢复 {affected} 个待确认租房房源为在租状态 (region={region})")
+        except Exception as e:
+            logger.error(f"恢复待确认租房房源失败: {e}")
         finally:
             cursor.close()
             self._return_connection(conn)
