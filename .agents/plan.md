@@ -7,10 +7,11 @@
 | 001 | Crawler delist guard | ACCEPTED | Claude Code | Highest priority data-safety fix |
 | 002 | Fix WoW date ranking SQL | ACCEPTED | Claude Code | Analyst correctness |
 | 003 | Make price-change view explicit | ACCEPTED | Claude Code | Avoid silent missing data |
-| 004 | Deduplicate same-day history rows | DRAFT | Codex | Depends on desired same-day semantics |
+| 004 | Deduplicate same-day history rows | ACCEPTED | Claude Code | Use one fact per house per day |
 | 005 | Normalize DB connection pool handling | DRAFT | Codex | Lower urgency unless pool errors recur |
 | 006 | Upgrade analyst Obsidian memory protocol | ACCEPTED | Codex | Memory 1.0 implemented |
 | 007 | Restore pending listings on failed crawl | ACCEPTED | Claude Code | Complete crawler status lifecycle |
+| 008 | KB-update schema validation | ACCEPTED | Claude Code | Guard long-term memory writes |
 
 ## Review Policy
 

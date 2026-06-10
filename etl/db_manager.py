@@ -211,6 +211,20 @@ class DatabaseManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pd_comm_region_date ON property_details (community, region, first_seen_date, last_seen_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_date ON price_history (record_date)')
 
+        # 去重：price_history 和 rent_history 同一天同一房源只保留最新一条
+        cursor.execute('''
+            DELETE FROM price_history a USING price_history b
+            WHERE a.id < b.id AND a.house_id = b.house_id AND a.record_date = b.record_date
+        ''')
+        cursor.execute('''
+            DELETE FROM rent_history a USING rent_history b
+            WHERE a.id < b.id AND a.house_id = b.house_id AND a.record_date = b.record_date
+        ''')
+
+        # 唯一索引：保证同一天同一房源只有一条记录
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_ph_house_date_uniq ON price_history (house_id, record_date)')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_rh_house_date_uniq ON rent_history (house_id, record_date)')
+
         # ========== 分析师视图 ==========
 
         # v_house_price_changes: 价格变动视图
@@ -781,33 +795,27 @@ class DatabaseManager:
             self._return_connection(conn)
     
     def batch_insert_price_history(self, prices):
-        """批量插入价格历史
-        
-        Args:
-            prices: 价格历史列表，每个元素是包含价格信息的字典
-        """
+        """批量插入价格历史（同一天同一房源只保留最新一条）"""
         if not prices:
             return
-        
+
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            # 使用 execute_values 进行批量插入
             from psycopg2.extras import execute_values
-            
+
             values = [(p['house_id'], p['price'], p['unit_price'], p['record_date']) for p in prices]
-            
-            execute_values(
-                cursor,
-                '''
+
+            execute_values(cursor, '''
                 INSERT INTO price_history (house_id, price, unit_price, record_date)
                 VALUES %s
-                ''',
-                values
-            )
-            
+                ON CONFLICT (house_id, record_date) DO UPDATE
+                SET price = EXCLUDED.price,
+                    unit_price = EXCLUDED.unit_price
+            ''', values)
+
             conn.commit()
-            logger.info(f"批量插入 {len(prices)} 条价格历史记录")
+            logger.info(f"批量插入/更新 {len(prices)} 条价格历史记录")
         except Exception as e:
             logger.error(f"批量插入价格历史失败: {e}")
             conn.rollback()
@@ -927,7 +935,7 @@ class DatabaseManager:
             self._return_connection(conn)
 
     def batch_insert_rent_history(self, prices):
-        """批量插入租金变动"""
+        """批量插入租金变动（同一天同一房源只保留最新一条）"""
         if not prices:
             return
 
@@ -939,9 +947,11 @@ class DatabaseManager:
             execute_values(cursor, '''
                 INSERT INTO rent_history (house_id, rent_price, record_date)
                 VALUES %s
+                ON CONFLICT (house_id, record_date) DO UPDATE
+                SET rent_price = EXCLUDED.rent_price
             ''', values)
             conn.commit()
-            logger.info(f"批量插入 {len(prices)} 条租金变动记录")
+            logger.info(f"批量插入/更新 {len(prices)} 条租金变动记录")
         except Exception as e:
             logger.error(f"批量插入租金变动失败: {e}")
             conn.rollback()
