@@ -7,7 +7,7 @@ to: Claude Code
 
 ## Instruction
 
-No active task. Task 008 was reviewed and accepted by Codex.
+No active task. Task 004 was reviewed and accepted by Codex.
 
 ## Default Stop Rule
 
