@@ -6,27 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository uses `.agents/` as the coordination layer between Codex and Claude Code.
 
-Before starting implementation work:
+If the user says "看 outbox", "继续", or "执行 Codex 指令", read only
+`.agents/outbox/claude-next.md` first and follow that file. The outbox will list
+any additional task, Git, or protocol files needed for the current step.
 
-1. Read `.agents/README.md`.
-2. Read `.agents/brief.md`.
-3. Read `.agents/invariants.md`.
-4. Read `.agents/test-protocol.md`.
-5. Read `.agents/claude-code-guidelines.md`.
-6. Read `.agents/git-workflow.md`.
-7. Pick only a task in `.agents/tasks/` whose status is `READY_FOR_CLAUDE` or a current task explicitly marked `NEEDS_REVISION`.
+Do not load every `.agents/` file by default. Use these files only when the
+outbox or user asks for them:
 
-Claude Code is the implementation agent. Codex owns planning, architecture review,
-and acceptance. Do not start `DRAFT`, `NEEDS_REVISION`, `ACCEPTED`, or `CANCELLED`
-tasks unless explicitly instructed.
+- `.agents/README.md` — collaboration protocol
+- `.agents/git-workflow.md` — branch and commit rules
+- `.agents/invariants.md` — data correctness rules
+- `.agents/tasks/*.md` — current task details
 
-For each task:
-
-- change the task status to `IN_PROGRESS` when starting;
-- keep edits inside the task scope;
-- write `.agents/reports/<task-id>-result.md` when done;
-- update task status to `SUBMITTED_FOR_REVIEW`;
-- stop for Codex review before taking the next task.
+After executing an outbox instruction, write a short status update to
+`.agents/inbox/claude-result.md` and stop for Codex review if the task is marked
+`SUBMITTED_FOR_REVIEW`.
 
 ## Project overview
 
