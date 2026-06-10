@@ -38,6 +38,8 @@ data/
 
 # 分析报告（Obsidian vault，不上传）
 reports/
+!.agents/reports/
+!.agents/reports/*.md
 
 # 分发
 dist/
