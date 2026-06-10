@@ -460,19 +460,23 @@ def global_db_consumer(queue, stop_event, db_config, regions):
             except Exception as e:
                 logger.error(f"结算 {region} 区域价格指标失败: {e}")
         
-        # 标记消失的房源（仅限成功完成的区域）
-        logger.info("🔍 开始标记消失的房源")
+        # 区域结算：成功→下架，失败/无信号→恢复待确认
+        logger.info("🔍 开始区域结算")
         for region in regions:
             outcome = region_outcomes.get(region)
-            if not outcome or not outcome['ok']:
+            if outcome and outcome['ok']:
+                try:
+                    db_manager.mark_disappeared_properties(region=region)
+                    logger.info(f"✅ {region}: 下架标记完成")
+                except Exception as e:
+                    logger.error(f"❌ {region}: 下架标记失败: {e}")
+            else:
                 reason = outcome.get('reason', 'no_signal') if outcome else 'no_signal'
-                logger.warning(f"⏭️  {region}: 跳过下架标记 (reason={reason})")
-                continue
-            try:
-                db_manager.mark_disappeared_properties(region=region)
-                logger.info(f"✅ {region} 区域消失房源标记完成")
-            except Exception as e:
-                logger.error(f"❌ 标记 {region} 区域消失房源失败: {e}")
+                try:
+                    db_manager.restore_pending_properties(region=region)
+                    logger.info(f"↩️  {region}: 恢复待确认房源 (reason={reason})")
+                except Exception as e:
+                    logger.error(f"❌ {region}: 恢复待确认失败: {e}")
     
     total_time = time.time() - start_time
     logger.info(f"🏁 数据库写入线程完成，共处理 {processed_count} 条房源")

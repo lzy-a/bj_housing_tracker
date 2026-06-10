@@ -211,6 +211,21 @@ class DatabaseManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pd_comm_region_date ON property_details (community, region, first_seen_date, last_seen_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ph_date ON price_history (record_date)')
 
+        # ========== 分析师视图 ==========
+
+        # v_house_price_changes: 价格变动视图
+        cursor.execute('''
+            CREATE OR REPLACE VIEW v_house_price_changes AS
+            SELECT p.record_date,
+                   d.region,
+                   p.price - lag(p.price) OVER (
+                       PARTITION BY p.house_id
+                       ORDER BY p.record_date
+                   ) AS diff
+            FROM price_history p
+            JOIN property_details d ON p.house_id::text = d.house_id::text
+        ''')
+
         # ========== Finder 模块表 ==========
 
         # 8. 收藏小区
@@ -465,8 +480,8 @@ class DatabaseManager:
         try:
             # 将状态为2（待确认）的房源标记为0（下架）
             cursor.execute('''
-                UPDATE property_details 
-                SET status = 0 
+                UPDATE property_details
+                SET status = 0
                 WHERE region = %s AND status = 2
             ''', (region,))
             affected = cursor.rowcount
@@ -474,6 +489,44 @@ class DatabaseManager:
             logger.info(f"成功标记 {affected} 个消失的房源为下架状态")
         except Exception as e:
             logger.error(f"标记消失房源失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def restore_pending_properties(self, region: str):
+        """爬取不可信时，将待确认房源恢复为在租状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE property_details
+                SET status = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE region = %s AND status = 2
+            ''', (region,))
+            affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"恢复 {affected} 个待确认房源为在租状态 (region={region})")
+        except Exception as e:
+            logger.error(f"恢复待确认房源失败: {e}")
+        finally:
+            cursor.close()
+            self._return_connection(conn)
+
+    def restore_pending_rentals(self, region: str):
+        """爬取不可信时，将待确认租房房源恢复为在租状态"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE rental_details
+                SET status = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE region = %s AND status = 2
+            ''', (region,))
+            affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"恢复 {affected} 个待确认租房房源为在租状态 (region={region})")
+        except Exception as e:
+            logger.error(f"恢复待确认租房房源失败: {e}")
         finally:
             cursor.close()
             self._return_connection(conn)
