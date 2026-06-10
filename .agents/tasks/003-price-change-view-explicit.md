@@ -1,6 +1,6 @@
 # Task 003: Make Price-Change View Explicit
 
-status: READY_FOR_CLAUDE
+status: ACCEPTED
 owner: Claude Code
 created: 2026-06-09
 priority: P2
@@ -13,6 +13,19 @@ Ensure `v_house_price_changes` exists or replace its usage so analyst queries do
 
 `analyst/sql_queries.py` references `v_house_price_changes`, but this repository does not create that view. `DatabaseManager.execute_query()` returns an empty DataFrame on SQL failure, which can make missing infrastructure look like real empty market data.
 
+The current local PostgreSQL view definition, recovered from `pg_get_viewdef`, is:
+
+```sql
+SELECT p.record_date,
+       d.region,
+       p.price - lag(p.price) OVER (
+           PARTITION BY p.house_id
+           ORDER BY p.record_date
+       ) AS diff
+FROM price_history p
+JOIN property_details d ON p.house_id::text = d.house_id::text;
+```
+
 Relevant files:
 
 - `analyst/sql_queries.py`
@@ -21,7 +34,7 @@ Relevant files:
 
 ## Scope
 
-- Add idempotent creation of `v_house_price_changes` in database initialization, or rewrite analyst SQL to compute the view inline.
+- Add idempotent creation of `v_house_price_changes` in database initialization, or rewrite analyst SQL to compute the view inline. Prefer preserving the current view semantics shown above unless a clear bug is found.
 - Make missing critical analyst dependencies visible enough that reports are not misleading.
 - Keep compatibility with existing SQL column expectations: `record_date`, `region`, `diff`, and any fields currently queried.
 
