@@ -856,13 +856,15 @@ class DatabaseManager:
             cursor.close()
             self._return_connection(conn)
     
-    def execute_query(self, query, params=None):
+    def execute_query(self, query, params=None, strict=False):
         """执行自定义SQL查询"""
         conn = self._get_connection()
         try:
             return pd.read_sql_query(query, conn, params=params)
         except Exception as e:
             logger.error(f"执行SQL查询失败: {e}")
+            if strict:
+                raise
             return pd.DataFrame()
         finally:
             self._return_connection(conn)

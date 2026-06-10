@@ -22,14 +22,15 @@ sys.path.insert(0, str(project_root))
 
 from config.settings import DB_CONFIG, CLAUDE_API_KEY, CLAUDE_BASE_URL, CLAUDE_MODEL, ANALYST_CONFIG
 from etl.db_manager import DatabaseManager
-from analyst.extractor import DataExtractor
+from analyst.extractor import DataExtractor, QueryResult
 from analyst.analyst_agent import AnalystAgent
 from analyst.report_writer import write_daily_report, write_weekly_report
 from analyst.knowledge_base import (
     read_all_district_profiles, read_hypotheses,
     append_district_observation, update_district_stats,
-    append_hypothesis, write_watchlist, write_dashboard,
-    read_last_weekly_report,
+    append_hypothesis, append_new_hypothesis, append_hypothesis_update,
+    write_watchlist, write_dashboard, read_recent_district_observations,
+    read_last_weekly_report, read_buying_assessment,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -44,6 +45,10 @@ def _is_weekly_day() -> bool:
 
 def _format_df(df, max_rows: int = 200) -> str:
     """DataFrame → compact markdown table。"""
+    if isinstance(df, QueryResult):
+        if df.status == "error":
+            return f"(数据提取失败: {df.error})"
+        df = df.data
     if df is None or df.empty:
         return "(无数据)"
     if len(df) > max_rows:
@@ -62,9 +67,14 @@ def _build_knowledge_context() -> str:
     for region in ["东城区", "西城区", "海淀区", "朝阳区", "丰台区", "石景山区"]:
         p = profiles.get(region, {})
         fm = p.get("frontmatter", {})
-        body = p.get("body", "")
-        if fm or body:
-            parts.append(f"**{region}**: 观察 {fm.get('observation_count', 0)} 条")
+        recent = read_recent_district_observations(region, limit=3)
+        if fm or recent:
+            parts.append(f"#### {region}")
+            parts.append(f"观察数: {fm.get('observation_count', 0)}")
+            if recent:
+                parts.append(recent)
+            else:
+                parts.append("暂无近期观察。")
 
     parts.append(f"\n### 活跃假设\n")
     if hyps.get("body"):
@@ -80,6 +90,11 @@ def _build_knowledge_context() -> str:
     if last_report:
         parts.append(f"\n### 上周报告摘要\n")
         parts.append(last_report[:2000])
+
+    buying = read_buying_assessment()
+    if buying:
+        parts.append("\n### 当前买房行动建议\n")
+        parts.append(buying)
 
     return "\n".join(parts)
 
@@ -107,14 +122,17 @@ def _update_kb_from_response(kb_update: dict):
 
     # 假设更新
     for h in kb_update.get("hypothesis_updates", []):
-        append_hypothesis(f"**[验证]** {h.get('title', '?')}: {h.get('finding', '')} "
-                          f"(状态: {h.get('status', '?')})")
+        if isinstance(h, dict):
+            append_hypothesis_update(h)
+        else:
+            append_hypothesis(str(h))
 
     # 新假设
     for h in kb_update.get("new_hypotheses", []):
-        append_hypothesis(f"**[新假设]** {h.get('title', '?')} "
-                          f"(置信度: {h.get('confidence', '?')})\n"
-                          f"{h.get('description', '')}")
+        if isinstance(h, dict):
+            append_new_hypothesis(h)
+        else:
+            append_hypothesis(str(h))
 
     # 重点关注
     wl = kb_update.get("watchlist_update", "")
@@ -128,7 +146,7 @@ def _update_kb_from_response(kb_update: dict):
         write_dashboard(f"## 最新市场信号\n{sig_text}")
 
     # 购买力评估
-    ba = kb_update.get("buying_assessment", {})
+    ba = kb_update.get("buyer_decision_update") or kb_update.get("buying_assessment", {})
     if ba:
         from analyst.knowledge_base import write_buying_assessment
         write_buying_assessment(ba)
@@ -169,10 +187,16 @@ def main():
 
     if args.dry_run:
         print("🟡 Dry-run 模式：数据已提取，跳过 API 调用\n")
-        for name, df in data.items():
-            if df is not None and not df.empty:
+        for name, result in data.items():
+            df = result.data if hasattr(result, "data") else result
+            status = getattr(result, "status", "ok")
+            if status == "error":
+                print(f"--- {name} (ERROR) ---")
+                print(_format_df(result, max_rows=5))
+                print()
+            elif df is not None and not df.empty:
                 print(f"--- {name} ({len(df)} rows) ---")
-                print(_format_df(df, max_rows=5))
+                print(_format_df(result, max_rows=5))
                 print()
         print("✅ Dry-run 完成")
         return
