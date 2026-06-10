@@ -1,6 +1,6 @@
 # Task 002: Fix WoW Date Ranking SQL
 
-status: READY_FOR_CLAUDE
+status: ACCEPTED
 owner: Claude Code
 created: 2026-06-09
 priority: P1
