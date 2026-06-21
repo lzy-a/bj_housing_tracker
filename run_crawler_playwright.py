@@ -17,6 +17,7 @@ sys.path.insert(0, str(project_root))
 from config.settings import DB_CONFIG, SCRAPER_CONFIG, CHROME_DEBUG_PORT
 from bs4 import BeautifulSoup
 from scrapers.i5i5j_scraper_playwright import I5I5JScraperPlaywright
+from scrapers.auth_recovery import AuthRecoveryCoordinator
 from etl.db_manager import DatabaseManager
 from datetime import datetime
 import random
@@ -49,7 +50,7 @@ def calc_district_stats(unit_prices, prices, areas):
 
 
 
-async def process_page(page, region_code, region_name, page_num, shared_queue):
+async def process_page(page, region_code, region_name, page_num, shared_queue, auth):
     """处理单个页面，返回 (outcome, listing_count, elapsed_ms)
     outcome: 'success' | 'no_data' | 'suspicious'
     """
@@ -57,7 +58,9 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
     try:
         url = f"https://bj.5i5j.com/ershoufang/{region_code}/n{page_num}/"
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page_label = f"{region_name} P{page_num}"
+        if not await auth.navigate(page, url, page_label):
+            return 'suspicious', 0, (time.perf_counter() - t0) * 1000
 
         # 点击认证处理：恢复成功 = 正常，恢复失败 = hard failure
         try:
@@ -71,11 +74,25 @@ async def process_page(page, region_code, region_name, page_num, shared_queue):
                     await page.wait_for_selector('ul.pList', timeout=15000)
                     logger.info(f"认证恢复成功 {region_name} P{page_num}")
                 except Exception:
-                    logger.warning(f"认证恢复失败 {region_name} P{page_num}")
-                    return 'suspicious', 0, (time.perf_counter() - t0) * 1000
+                    if not await auth.recover_after_redirect(page, url, page_label):
+                        logger.warning(f"登录恢复失败 {region_name} P{page_num}")
+                        return 'suspicious', 0, (time.perf_counter() - t0) * 1000
+                    try:
+                        await page.wait_for_selector('ul.pList', timeout=5000)
+                    except Exception:
+                        logger.warning(f"认证恢复失败 {region_name} P{page_num}")
+                        return 'suspicious', 0, (time.perf_counter() - t0) * 1000
         except Exception:
             pass
 
+        try:
+            await page.wait_for_selector('ul.pList', timeout=5000)
+        except Exception:
+            pass
+
+        # 部分登录跳转会在 domcontentloaded 之后延迟发生，再检查一次。
+        if not await auth.recover_after_redirect(page, url, page_label):
+            return 'suspicious', 0, (time.perf_counter() - t0) * 1000
         try:
             await page.wait_for_selector('ul.pList', timeout=5000)
         except Exception:
@@ -131,6 +148,18 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
     logger.info("🔐 开始检查登录状态")
     await login_scraper.check_and_login()
     logger.info("✅ 登录检查完成")
+
+    async def refresh_login():
+        auth_scraper = I5I5JScraperPlaywright(debug_port=debug_port)
+        await auth_scraper.connect()
+        try:
+            await auth_scraper.check_and_login()
+        finally:
+            await auth_scraper.close()
+
+    auth = AuthRecoveryCoordinator(
+        refresh_login, logger, label="[二手房] "
+    )
     login_used = False
 
     try:
@@ -173,7 +202,9 @@ async def run_multi_tab_worker_playwright(debug_port, district_tasks, shared_que
                     while not is_region_finished:
                         try:
                             page_num = await asyncio.wait_for(page_queue.get(), timeout=5)
-                            outcome, listings_count, page_ms = await process_page(page, dist_code, dist_name, page_num, shared_queue)
+                            outcome, listings_count, page_ms = await process_page(
+                                page, dist_code, dist_name, page_num, shared_queue, auth
+                            )
                             total_listings += listings_count
                             pages_processed += 1
                             total_page_time += page_ms
